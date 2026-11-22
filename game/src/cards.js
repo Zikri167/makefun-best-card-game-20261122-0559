@@ -1,39 +1,71 @@
-// Ember Pact — the card catalogue.
-// Fifteen original designs, two copies each, make the 30-card deck both
-// duelists draw from. A card is one plain object: its element, its kind
-// (Strike hits, Guardian stands on the table, Trick does something at
-// once), its ember cost, and the numbers its kind needs.
-export const CARDS = [
-  { id: 'ember-slash', name: 'Ember Slash', element: 'FLAME', type: 'strike', cost: 1, power: 3, text: 'Deal 3 damage.' },
-  { id: 'cinder-fang', name: 'Cinder Fang', element: 'FLAME', type: 'strike', cost: 2, power: 5, text: 'Deal 5 damage.' },
-  { id: 'phoenix-dive', name: 'Phoenix Dive', element: 'FLAME', type: 'strike', cost: 4, power: 8, text: 'Deal 8 damage.' },
-  { id: 'thorn-whip', name: 'Thorn Whip', element: 'THORN', type: 'strike', cost: 1, power: 3, text: 'Deal 3 damage.' },
-  { id: 'bramble-shot', name: 'Bramble Shot', element: 'THORN', type: 'strike', cost: 2, power: 5, text: 'Deal 5 damage.' },
-  { id: 'tide-lash', name: 'Tide Lash', element: 'TIDE', type: 'strike', cost: 1, power: 3, text: 'Deal 3 damage.' },
-  { id: 'wave-crash', name: 'Wave Crash', element: 'TIDE', type: 'strike', cost: 2, power: 5, text: 'Deal 5 damage.' },
-  { id: 'cinder-bulwark', name: 'Cinder Bulwark', element: 'FLAME', type: 'guardian', cost: 2, power: 2, health: 5, text: 'Guardian 5. Hits back for 2.' },
-  { id: 'thornwall', name: 'Thornwall', element: 'THORN', type: 'guardian', cost: 2, power: 2, health: 6, text: 'Guardian 6. Hits back for 2.' },
-  { id: 'tide-shield', name: 'Tide Shield', element: 'TIDE', type: 'guardian', cost: 2, power: 2, health: 5, text: 'Guardian 5. Hits back for 2.' },
-  { id: 'coral-bastion', name: 'Coral Bastion', element: 'TIDE', type: 'guardian', cost: 4, power: 2, health: 9, text: 'Guardian 9. Hits back for 2.' },
-  { id: 'kindle-insight', name: 'Kindle Insight', element: 'FLAME', type: 'trick', cost: 2, power: 0, effect: 'draw2', text: 'Draw 2 cards.' },
-  { id: 'spark-siphon', name: 'Spark Siphon', element: 'FLAME', type: 'trick', cost: 3, power: 0, effect: 'steal', text: 'Steal 1 ember from Rook.' },
-  { id: 'bloom-mend', name: 'Bloom Mend', element: 'THORN', type: 'trick', cost: 2, power: 0, effect: 'heal3', text: 'Restore 3 Life.' },
-  { id: 'tide-pull', name: 'Tide Pull', element: 'TIDE', type: 'trick', cost: 2, power: 0, effect: 'draw-ember', text: 'Draw 1 card. Gain 1 ember.' },
+// Ember Pact — the deck. Fifteen original designs, two copies each, for a
+// 30-card deck. Three elements, three card types:
+//   strike   — hits the enemy (guardians block first)
+//   guardian — stays on the table with Health, soaks strikes
+//   trick    — one-shot effect: draw, steal ember, heal, or draw + ember
+// Power is the strike damage / guardian strength; guardian Health is
+// power + 3, shown on the card.
+
+import { ELEMENTS } from './config.js';
+
+export const CARD_DEFS = [
+  { name: 'Ember Spark', element: 'flame', type: 'strike', cost: 1, power: 2, text: 'Deal 2 damage.' },
+  { name: 'Flame Lash', element: 'flame', type: 'strike', cost: 2, power: 4, text: 'Deal 4 damage.' },
+  { name: 'Pyre Hound', element: 'flame', type: 'guardian', cost: 2, power: 3, text: 'Guardian. Health 6.' },
+  { name: 'Ash Draw', element: 'flame', type: 'trick', cost: 2, power: 0, effect: 'draw2', text: 'Draw 2 cards.' },
+  { name: 'Inferno Blast', element: 'flame', type: 'strike', cost: 4, power: 6, text: 'Deal 6 damage.' },
+  { name: 'Thorn Whip', element: 'thorn', type: 'strike', cost: 1, power: 3, text: 'Deal 3 damage.' },
+  { name: 'Bramble Wall', element: 'thorn', type: 'guardian', cost: 2, power: 3, text: 'Guardian. Health 6.' },
+  { name: 'Vine Snare', element: 'thorn', type: 'trick', cost: 2, power: 0, effect: 'steal', text: 'Steal 1 ember.' },
+  { name: 'Thorn Barrage', element: 'thorn', type: 'strike', cost: 3, power: 5, text: 'Deal 5 damage.' },
+  { name: 'Bloom Mend', element: 'thorn', type: 'trick', cost: 2, power: 0, effect: 'heal', text: 'Heal 3 Life.' },
+  { name: 'Tide Splash', element: 'tide', type: 'strike', cost: 1, power: 2, text: 'Deal 2 damage.' },
+  { name: 'Wave Guard', element: 'tide', type: 'guardian', cost: 3, power: 4, text: 'Guardian. Health 7.' },
+  { name: 'Deep Draw', element: 'tide', type: 'trick', cost: 1, power: 0, effect: 'drawEmber', text: 'Draw 1 card, +1 ember.' },
+  { name: 'Tidal Surge', element: 'tide', type: 'strike', cost: 3, power: 5, text: 'Deal 5 damage.' },
+  { name: 'Coral Bastion', element: 'tide', type: 'guardian', cost: 3, power: 5, text: 'Guardian. Health 8.' },
 ];
 
-export const CARDS_BY_ID = {};
-for (const c of CARDS) CARDS_BY_ID[c.id] = c;
+let uidCounter = 1;
 
-/** The 30 ids of one deck: every design twice, in catalogue order. */
-export function deckCardIds() {
-  const ids = [];
-  for (const c of CARDS) {
-    ids.push(c.id, c.id);
-  }
-  return ids;
+export function makeCard(def) {
+  return {
+    uid: uidCounter++,
+    name: def.name,
+    element: def.element,
+    type: def.type,
+    cost: def.cost,
+    power: def.power,
+    effect: def.effect || null,
+    text: def.text,
+  };
 }
 
-/** Look a card definition up by id; null for an unknown id. */
-export function cardDef(id) {
-  return CARDS_BY_ID[id] || null;
+export function makeGuardian(card) {
+  return {
+    uid: card.uid,
+    name: card.name,
+    element: card.element,
+    power: card.power,
+    health: card.power + 3,
+    maxHealth: card.power + 3,
+  };
+}
+
+// A fresh 30-card deck: every design twice, in definition order.
+export function buildDeck() {
+  const deck = [];
+  for (const def of CARD_DEFS) {
+    deck.push(makeCard(def));
+    deck.push(makeCard(def));
+  }
+  return deck;
+}
+
+export function elementOf(card) {
+  return card.element;
+}
+
+export function elements() {
+  return ELEMENTS.slice();
 }
