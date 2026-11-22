@@ -1,99 +1,106 @@
-// Ember Pact — the mind of Rook, the AI duelist.
-// Rook is greedy and readable on purpose: it scores every card it could
-// play, takes the best one, and its strike target is telegraphed before it
-// lands, so the player can answer with a Guardian. It also sometimes banks
-// its ember for a big Trick instead of spending it all at once.
-import { ADVANTAGE_BONUS, beatsElement } from './config.js';
-import { cardDef } from './cards.js';
+// Ember Pact — Rook, the AI opponent. Greedy but readable: it scores every
+// playable card, prefers elemental advantage and lethal, summons a guardian
+// when the player threatens lethal, and saves ember for a big trick when
+// nothing good is on the table. It also earns Charge exactly like the
+// player and spends it on POWER only when the extra damage is lethal or
+// smashes a guardian. Taunts are picked per element, 2-3 lines each.
 
-/** The guardian a Strike would hit: the weakest one, or null for open Life. */
-export function strikeTarget(state, defender) {
-  if (defender.guardians.length === 0) return null;
-  let weakest = defender.guardians[0];
-  for (const g of defender.guardians) {
-    if (g.health < weakest.health) weakest = g;
-  }
-  return weakest;
+import { beats, POWER_BONUS } from './config.js';
+import { rngPick } from './random.js';
+
+export const TAUNTS = {
+  flame: [
+    'Rook: "I will burn your pact to ash."',
+    'Rook: "Feel the heat, little ember."',
+    'Rook: "My flames eat cowards first."',
+  ],
+  thorn: [
+    'Rook: "My thorns will hold you still."',
+    'Rook: "Struggle all you like — the vines tighten."',
+    'Rook: "One prick, and the garden owns you."',
+  ],
+  tide: [
+    'Rook: "The tide takes everything back."',
+    'Rook: "Drown quietly, ember."',
+    'Rook: "You cannot outswim the deep."',
+  ],
+};
+
+export function pickTaunt(rng, element) {
+  const lines = TAUNTS[element] || TAUNTS.flame;
+  return rngPick(rng, lines);
 }
 
-/** Damage a strike of `card` would deal to `defender` right now. */
-export function strikeDamage(card, defender) {
-  const target = strikeTarget(null, defender);
-  let dmg = card.power;
-  if (target && beatsElement(card.element, target.element)) dmg += ADVANTAGE_BONUS;
-  return { damage: dmg, target };
-}
-
-/** Score one playable card for Rook; higher means Rook wants it more. */
-function scoreCard(state, card, index) {
+// Score one card in Rook's hand. Higher is better.
+export function scoreCard(state, card, index) {
   const rook = state.rook;
-  const you = state.you;
+  const player = state.player;
+  let score = 0;
+  const adv = player.lastElement && beats(card.element, player.lastElement) ? 2 : 0;
   if (card.type === 'strike') {
-    const target = strikeTarget(state, you);
-    let dmg = card.power;
-    if (target && beatsElement(card.element, target.element)) dmg += ADVANTAGE_BONUS;
-    let score = dmg * 2;
-    if (target) {
-      if (dmg >= target.health) score += 9; // breaks the wall
-      score += 2; // a strike that must chew a guardian is still progress
+    score = card.power * 2 + adv * 2;
+    if (card.power >= player.life) score += 100; // lethal
+    if (player.guardians.length > 0) {
+      const weakest = Math.min(...player.guardians.map((g) => g.health));
+      if (card.power >= weakest) score += 12; // smashes a guardian
     }
-    if (dmg >= you.life) score += 1000; // lethal is everything
-    if (rook.life <= 6 && dmg >= you.life - 4) score += 6; // press a close game
-    return score;
+    if (card.power + POWER_BONUS >= player.life && rook.charge > 0) score += 40;
+  } else if (card.type === 'guardian') {
+    score = 6 + card.power;
+    if (player.life <= 8) score -= 4; // press the attack instead
+    const threat = player.hand.reduce((m, c) => Math.max(m, c.type === 'strike' ? c.power : 0), 0);
+    if (threat >= rook.life) score += 20; // block lethal
+  } else if (card.type === 'trick') {
+    if (card.effect === 'draw2') score = rook.hand.length <= 2 ? 14 : 5;
+    else if (card.effect === 'steal') score = player.ember > 0 ? 12 : 2;
+    else if (card.effect === 'heal') score = rook.life <= 12 ? 18 : 3;
+    else if (card.effect === 'drawEmber') score = 10;
+    else score = 5;
   }
-  if (card.type === 'guardian') {
-    let score = card.health * 1.2 + card.power;
-    if (rook.guardians.length === 0) score += 4; // an empty wall begs for one
-    if (you.life <= 6) score += 3; // protect a lead
-    if (rook.life <= 8) score += 5; // hide behind something when hurt
-    return score;
-  }
-  // Tricks.
-  if (card.effect === 'draw2') return rook.hand.length <= 3 ? 7 : 4;
-  if (card.effect === 'steal') return you.ember >= 4 ? 8 : 3;
-  if (card.effect === 'heal3') return (20 - rook.life) * 0.9 + 1;
-  if (card.effect === 'draw-ember') return rook.hand.length <= 2 ? 8 : 5;
-  return 3;
+  score -= card.cost; // prefer cheap value
+  score += index * 0.01; // stable tie-break
+  return score;
 }
 
-/**
- * Rook's next move: { action: 'play', index } or { action: 'end' }.
- * Plays the best affordable card, or banks ember when a Trick it cannot
- * yet afford is worth waiting for (a seeded coin-flip, so replays agree).
- */
-export function rookChoose(state) {
+// Plan Rook's whole turn: a list of hand indexes, best first, that fit
+// the ember Rook will have. The world executes them one at a time.
+export function planRookTurn(state) {
   const rook = state.rook;
-  let best = null;
-  let bestScore = -1;
-  for (let i = 0; i < rook.hand.length; i++) {
-    const card = cardDef(rook.hand[i].id);
-    if (!card || card.cost > rook.ember) continue;
-    const score = scoreCard(state, card, i);
-    if (score > bestScore) {
-      bestScore = score;
-      best = i;
+  let ember = rook.ember;
+  const plan = [];
+  const used = new Set();
+  for (;;) {
+    let best = null;
+    let bestScore = 4; // do not play junk just to play it
+    for (let i = 0; i < rook.hand.length; i++) {
+      if (used.has(i)) continue;
+      const card = rook.hand[i];
+      if (card.cost > ember) continue;
+      const s = scoreCard(state, card, i);
+      if (s > bestScore) {
+        bestScore = s;
+        best = i;
+      }
     }
+    if (best === null) break;
+    plan.push(best);
+    used.add(best);
+    ember -= rook.hand[best].cost;
   }
-  if (best !== null && bestScore > 0) {
-    // Banking: a fat Trick sits in hand, unaffordable this turn, and Rook
-    // would rather save than spend on something small.
-    const bigTrick = rook.hand.some((c) => {
-      const d = cardDef(c.id);
-      return d && d.type === 'trick' && d.cost > rook.ember && d.cost <= 4;
-    });
-    if (bigTrick && bestScore < 6 && state.rng() < 0.35) return { action: 'end' };
-    return { action: 'play', index: best };
-  }
-  return { action: 'end' };
+  return plan;
 }
 
-/** What Rook is about to do, in words the table can show while it aims. */
-export function rookIntentText(state, card) {
-  if (!card) return '';
-  if (card.type === 'strike') {
-    const target = strikeTarget(state, state.you);
-    return target ? `ROOK AIMS AT ${target.name.toUpperCase()}` : 'ROOK AIMS AT YOUR LIFE';
+// Should Rook spend 1 Charge on POWER for this strike? Only when the
+// boosted damage is lethal or destroys a player guardian.
+export function rookWantsPower(state, card, power) {
+  const rook = state.rook;
+  const player = state.player;
+  if (rook.charge < 1) return false;
+  const boosted = power + POWER_BONUS;
+  if (boosted >= player.life && player.guardians.length === 0) return true;
+  if (player.guardians.length > 0) {
+    const weakest = Math.min(...player.guardians.map((g) => g.health));
+    if (power < weakest && boosted >= weakest) return true;
   }
-  if (card.type === 'guardian') return `ROOK SUMMONS ${card.name.toUpperCase()}`;
-  return `ROOK CASTS ${card.name.toUpperCase()}`;
+  return false;
 }
