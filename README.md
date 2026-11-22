@@ -1,8 +1,8 @@
 # Ember Pact — Elemental Card Duel
 
-[![make.fun competition](https://make.fun/badge/competition/best-card-game-20261122-1826)](https://make.fun/competitions/best-card-game-20261122-1826)
-[![make.fun rank](https://make.fun/badge/rank/Zikri167/makefun-best-card-game-20261122-0559)](https://make.fun/competitions/best-card-game-20261122-1826)
-[![make.fun reward](https://make.fun/badge/reward/best-card-game-20261122-1826)](https://make.fun/competitions/best-card-game-20261122-1826)
+[![make.fun · best-card-game-20261122-1826](https://make.fun/badge/best-card-game-20261122-1826.svg)](https://make.fun/bounty/best-card-game-20261122-1826?utm_source=github&utm_medium=readme&utm_campaign=best-card-game-20261122-1826)
+[![rank](https://make.fun/badge/best-card-game-20261122-1826/Zikri167/makefun-best-card-game-20261122-0559/rank.svg)](https://make.fun/bounty/best-card-game-20261122-1826/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=best-card-game-20261122-1826)
+[![reward](https://make.fun/badge/best-card-game-20261122-1826/Zikri167/makefun-best-card-game-20261122-0559/reward.svg)](https://make.fun/bounty/best-card-game-20261122-1826?utm_source=github&utm_medium=readme&utm_campaign=best-card-game-20261122-1826)
 
 A complete original card duel for the [best-card-game-20261122-1826](https://make.fun/competitions/best-card-game-20261122-1826) bounty on make.fun. You face Rook, a greedy AI, across a green baize table. Twenty Life each, a 30-card deck, ember that grows every turn — and every hand is a decision.
 
