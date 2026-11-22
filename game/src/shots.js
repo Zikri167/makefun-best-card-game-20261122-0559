@@ -1,131 +1,81 @@
-// Ember Pact — screenshot scenes and scripted test setups.
-// A shot stages a real match through the real rules (cards are played
-// with playCard, turns with endTurn, Rook with its own chooser), then
-// pins the exact display values the cover needs — Life 20 vs 14, ember
-// 6/10, the Resonance banner — so the four images are deterministic for
-// a fixed seed and honest renders of the game's own code.
-import { drawCards, makeCard } from './deck.js';
-import { endTurn, playCard, rookTurnInstant, startMatch, update } from './world.js';
+// Ember Pact — deterministic screenshot staging. Each shot builds its
+// scene from the real rules (real cards, real state fields) with a fixed
+// seed, so the four screenshots are reproducible and show the actual game,
+// never a composite. The cover shot is a rich mid-game table: Charge pips,
+// the legend, and the compact Resonance badge all visible.
 
-function findInHand(side, id) {
-  return side.hand.findIndex((c) => c.id === id);
+import { CARD_DEFS, makeCard, makeGuardian } from './cards.js';
+
+function defByName(name) {
+  return CARD_DEFS.find((d) => d.name === name);
 }
 
-function rigHand(side, ids) {
-  side.hand = ids.map((id) => makeCard(id));
+function handOf(names) {
+  return names.map((n) => makeCard(defByName(n)));
 }
 
-function drainRookTurn(state) {
-  for (let i = 0; i < 400 && state.turn === 'rook' && state.screen === 'play'; i++) {
-    update(state, 0.1);
+// Stage one named scene on a live world. Called before the first frame.
+export function stageShot(world, name) {
+  const s = world.state;
+  if (name === 'title') {
+    s.phase = 'title';
+    return;
   }
-}
-
-function topUpHand(state, side, ids) {
-  rigHand(side, ids);
-}
-
-function ensureGuardian(side, def) {
-  if (side.guardians.length === 0) {
-    side.guardians.push({
-      uid: 'shot-' + def.id,
-      id: def.id,
-      name: def.name,
-      element: def.element,
-      power: def.power,
-      health: def.health,
-    });
-  }
-}
-
-function stagePlay(state, seed) {
-  startMatch(state, seed);
-  const you = state.you;
-  const rook = state.rook;
-  you.maxEmber = 10;
-  you.ember = 10;
-  rigHand(you, ['ember-slash', 'cinder-fang', 'thornwall', 'tide-lash', 'kindle-insight']);
-  // Two Flame strikes in one turn: the second lands the Resonance.
-  playCard(state, you, findInHand(you, 'ember-slash'));
-  playCard(state, you, findInHand(you, 'cinder-fang'));
-  playCard(state, you, findInHand(you, 'thornwall'));
-  endTurn(state);
-  drainRookTurn(state);
-  if (state.screen !== 'play') {
-    // Rook somehow ended it early; restage on the play screen.
-    startMatch(state, seed);
-    return stagePlay(state, seed);
-  }
-  // Both walls stand for the cover.
-  ensureGuardian(you, { id: 'thornwall', name: 'Thornwall', element: 'THORN', power: 2, health: 6 });
-  ensureGuardian(rook, { id: 'coral-bastion', name: 'Coral Bastion', element: 'TIDE', power: 2, health: 9 });
-  // The cover numbers, pinned after real play.
-  you.life = 20;
-  rook.life = 14;
-  you.maxEmber = 10;
-  you.ember = 6;
-  state.banner = { text: 'RESONANCE! FLAME +1' };
-  state.bannerT = 9;
-  topUpHand(state, you, ['ember-slash', 'cinder-fang', 'phoenix-dive', 'thornwall', 'tide-pull']);
-  drawCards(rook, state.rng, 5 - rook.hand.length > 0 ? 5 - rook.hand.length : 0, 7);
-  state.log.push('Resonance! Two FLAME cards — both strike +1 harder.');
-}
-
-function stageWin(state, seed) {
-  startMatch(state, seed);
-  state.you.life = 9;
-  state.rook.life = 4;
-  state.you.maxEmber = 10;
-  state.you.ember = 10;
-  rigHand(state.you, ['phoenix-dive', 'ember-slash', 'cinder-fang', 'thornwall', 'tide-lash']);
-  playCard(state, state.you, findInHand(state.you, 'phoenix-dive'));
-}
-
-function stageLoss(state, seed) {
-  startMatch(state, seed);
-  state.you.life = 3;
-  state.rook.life = 11;
-  state.rook.maxEmber = 10;
-  state.rook.ember = 10;
-  rigHand(state.rook, ['wave-crash', 'ember-slash', 'tide-shield']);
-  playCard(state, state.rook, findInHand(state.rook, 'wave-crash'));
-}
-
-/** Stage one of the four named scenes. Unknown names fall back to title. */
-export function stageShot(state, name, seed) {
-  if (name === 'play') return stagePlay(state, seed);
-  if (name === 'win') return stageWin(state, seed);
-  if (name === 'loss') return stageLoss(state, seed);
-  state.screen = 'title';
-  try {
-    window.localStorage.setItem('ember-pact-best', '1250');
-    state.best = 1250;
-  } catch {
-    state.best = 1250;
-  }
-}
-
-/**
- * Scripted near-win / near-loss starts for the interactive playtest:
- * one real click (or one ended turn) from the matching end screen.
- */
-export function stageTest(state, name, seed) {
   if (name === 'win') {
-    startMatch(state, seed);
-    state.you.life = 12;
-    state.rook.life = 4;
-    state.you.maxEmber = 10;
-    state.you.ember = 10;
-    rigHand(state.you, ['phoenix-dive', 'ember-slash', 'cinder-fang', 'thornwall', 'tide-lash']);
+    world.startGame(11);
+    s.phase = 'win';
+    s.winner = 'player';
+    s.rook.life = 0;
+    s.player.life = 12;
+    s.score = 12 * 100 + 14 * 15 + 9 * 10;
+    s.cardsPlayed = 14;
+    s.turnNum = 9;
+    s.confetti = Array.from({ length: 90 }, (_, i) => ({
+      x: (i * 137) % 1280, y: (i * 53) % 500,
+      v: 80, c: ['#e2482a', '#3f9e4d', '#2f7fd0', '#f2c14e'][i % 4],
+      s: 6 + (i % 5), r: i * 0.7,
+    }));
     return;
   }
   if (name === 'loss') {
-    startMatch(state, seed);
-    state.you.life = 3;
-    state.rook.life = 11;
-    state.rook.maxEmber = 10;
-    rigHand(state.rook, ['wave-crash']);
+    world.startGame(13);
+    s.phase = 'loss';
+    s.winner = 'rook';
+    s.player.life = 0;
+    s.rook.life = 9;
+    s.score = 11 * 15 + 8 * 10;
+    s.cardsPlayed = 11;
+    s.turnNum = 8;
     return;
   }
-  startMatch(state, seed);
+  // Default: 'play' — the cover. A busy mid-game table.
+  world.startGame(7);
+  s.player.life = 20;
+  s.rook.life = 14;
+  s.player.ember = 6;
+  s.player.maxEmber = 6;
+  s.rook.ember = 3;
+  s.rook.maxEmber = 6;
+  s.turnNum = 6;
+  s.player.hand = handOf(['Flame Lash', 'Tide Splash', 'Thorn Whip', 'Deep Draw', 'Pyre Hound']);
+  s.rook.hand = handOf(['Ember Spark', 'Thorn Whip', 'Tide Splash', 'Ash Draw', 'Bramble Wall']);
+  s.player.guardians = [makeGuardian(makeCard(defByName('Bramble Wall')))];
+  s.rook.guardians = [makeGuardian(makeCard(defByName('Wave Guard')))];
+  s.player.charge = 2;
+  s.rook.charge = 1;
+  s.player.lastElement = 'thorn';
+  s.rook.lastElement = 'flame';
+  s.played.player = { thorn: 2 };
+  s.played.rook = { flame: 1 };
+  s.resonance.player = true;
+  s.message = 'CHARGE +1 — played into the wind!';
+  s.messageTtl = 99;
+  s.rookTaunt = { text: 'Rook: "My flames eat cowards first."', ttl: 99 };
+  s.log = [
+    'CHARGE +1 — played into the wind!',
+    'You trigger RESONANCE! +1 power.',
+    'Rook summons Wave Guard.',
+    'Flame Lash hits Wave Guard for 4.',
+    'Turn 6 — your move. Ember 6/6.',
+  ];
 }
