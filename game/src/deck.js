@@ -1,43 +1,44 @@
-// Ember Pact — decks, drawing and discarding.
-// A deck is a shuffled pile of card instances (each carries a unique id so
-// the renderer can slide the same card around the table). Drawing past the
-// end reshuffles the discard pile, so a long duel never runs dry.
-import { deckCardIds } from './cards.js';
+// Ember Pact — deck pile: shuffle, draw, discard, reshuffle when empty.
+// Drawing from an empty deck reshuffles the discard pile back in, so a
+// long match never dead-ends; the legend on the table shows the count.
+
 import { shuffle } from './random.js';
+import { buildDeck } from './cards.js';
 
-let nextUid = 1;
-
-/** A fresh shuffled 30-card deck for one duelist. */
-export function makeDeck(rng) {
-  const ids = shuffle(rng, deckCardIds());
-  return ids.map((id) => ({ uid: nextUid++, id }));
+export function newPile(rng) {
+  return {
+    drawPile: shuffle(rng, buildDeck()),
+    discardPile: [],
+  };
 }
 
-/** A card instance built straight from a catalogue id (screenshot staging). */
-export function makeCard(id) {
-  return { uid: nextUid++, id };
+export function pileCounts(pile) {
+  return { deck: pile.drawPile.length, discard: pile.discardPile.length };
 }
 
-/**
- * Draw up to n cards from side.deck into side.hand (hand caps at HAND_MAX).
- * Reshuffles the discard pile when the deck runs out. Returns how many
- * were actually drawn.
- */
-export function drawCards(side, rng, n, handMax) {
-  let drawn = 0;
-  for (let k = 0; k < n; k++) {
-    if (side.hand.length >= handMax) break;
-    if (side.deck.length === 0) {
-      if (side.discard.length === 0) break;
-      side.deck = shuffle(rng, side.discard.splice(0));
+// Draw up to n cards; reshuffles discard into deck when the pile runs dry.
+export function drawFrom(pile, rng, n) {
+  const drawn = [];
+  for (let i = 0; i < n; i++) {
+    if (pile.drawPile.length === 0) {
+      if (pile.discardPile.length === 0) break;
+      pile.drawPile = shuffle(rng, pile.discardPile);
+      pile.discardPile = [];
     }
-    side.hand.push(side.deck.pop());
-    drawn++;
+    drawn.push(pile.drawPile.pop());
   }
   return drawn;
 }
 
-/** Move a card instance to its owner's discard pile. */
-export function discardCard(side, card) {
-  side.discard.push(card);
+export function discardTo(pile, card) {
+  if (card) pile.discardPile.push(card);
+}
+
+export function reshuffled(pile, rng) {
+  if (pile.drawPile.length === 0 && pile.discardPile.length > 0) {
+    pile.drawPile = shuffle(rng, pile.discardPile);
+    pile.discardPile = [];
+    return true;
+  }
+  return false;
 }
