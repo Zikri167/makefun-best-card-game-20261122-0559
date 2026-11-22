@@ -1,19 +1,22 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Ember Pact — Elemental Card Duel</title>
 <style>
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #241708; }
-  #game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
-  /* Read aloud, never shown: the status line screen readers announce. */
-  #status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  html, body { margin: 0; padding: 0; background: #17100b; height: 100%; }
+  body { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+  #wrap { width: min(1280px, 100vw); }
+  canvas { display: block; width: 100%; height: auto; background: #1e5c38; }
+  #status { color: #c9a35c; font: 13px sans-serif; text-align: center; padding: 8px; }
 </style>
 </head>
 <body>
-<canvas id="game" aria-label="Ember Pact: an elemental card duel against Rook. Click a card to play it, Space ends your turn."></canvas>
-<p id="status" role="status" aria-live="polite"></p>
+<div id="wrap">
+  <canvas id="game" width="1280" height="720"></canvas>
+  <div id="status">Ember Pact — click a card to play · Q POWER · W WARD · Space end turn · R restart · M mute · P pause</div>
+</div>
 <script type="module" src="./src/main.js"></script>
 </body>
 </html>
