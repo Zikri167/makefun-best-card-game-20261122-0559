@@ -1,418 +1,488 @@
-// Ember Pact — the match state machine.
-// Owns the whole duel: screens (title / play / win / loss), turns, ember,
-// combat, the Resonance combo, Rook's telegraphed turn, floating numbers
-// and the win confetti. The renderer only reads this state; it never
-// changes a rule.
-import {
-  ADVANTAGE_BONUS, beatsElement, EMBER_MAX, EMBER_START, HAND_MAX,
-  HAND_START, RESONANCE_BONUS, START_LIFE,
-} from './config.js';
-import { cardDef } from './cards.js';
-import { discardCard, drawCards, makeDeck } from './deck.js';
-import { mulberry32, randInt } from './random.js';
-import { rookChoose, rookIntentText, strikeTarget } from './ai.js';
+// Ember Pact — match state machine: title / play / win / loss, turns,
+// ember, combat, Resonance, and the v2 Elemental Charge rule. Rook's
+// turn runs on timers inside update() so the table stays readable: a
+// thinking beat, a taunt, a telegraph, then the hit (or a Ward fizzle).
 
-function newSide(name, rng) {
-  const side = {
-    name,
+import {
+  START_LIFE, HAND_SIZE, MAX_EMBER, MAX_CHARGE, RESONANCE_BONUS,
+  POWER_BONUS, losesTo, beats,
+} from './config.js';
+import { makeRng } from './random.js';
+import { makeGuardian } from './cards.js';
+import { newPile, drawFrom, discardTo } from './deck.js';
+import { planRookTurn, pickTaunt, rookWantsPower } from './ai.js';
+import { sfx, setMuted } from './audio.js';
+
+function newSide(rng) {
+  return {
     life: START_LIFE,
-    deck: makeDeck(rng),
-    discard: [],
+    ember: 1,
+    maxEmber: 1,
     hand: [],
     guardians: [],
-    ember: EMBER_START,
-    maxEmber: EMBER_START,
-    playsThisTurn: [],
-    playedThisTurn: [],
+    charge: 0,
+    lastElement: null,
+    powerArmed: false,
+    wardArmed: false,
+    pile: newPile(rng),
   };
-  drawCards(side, rng, HAND_START, HAND_MAX);
-  return side;
 }
 
-/** A fresh match in the title screen. Nothing has been played yet. */
-export function createMatch(seed) {
-  const rng = mulberry32(seed);
+export function createWorld(seed) {
   const state = {
-    seed,
-    rng,
-    screen: 'title',
+    phase: 'title',
+    seed: seed || 7,
+    rng: makeRng(seed || 7),
     turn: 'player',
-    turnCount: 1,
-    you: newSide('YOU', rng),
-    rook: newSide('ROOK', rng),
-    log: ['Welcome to Ember Pact. Sealed in flame, thorn and tide.'],
-    banner: null,
-    bannerT: 0,
-    aim: null,
-    aimT: 0,
-    aimText: '',
-    fx: [],
-    particles: [],
-    winner: null,
-    score: 0,
-    best: loadBest(),
+    turnNum: 1,
+    player: null,
+    rook: null,
+    played: { player: {}, rook: {} },
+    resonance: { player: false, rook: false },
+    log: [],
+    floaters: [],
+    message: '',
+    messageTtl: 0,
+    rookThinking: 0,
+    rookTaunt: null,
+    rookAim: null,
+    pendingStrike: null,
+    pendingRookStrike: null,
+    rookQueue: [],
+    rookTimer: 0,
     paused: false,
     muted: false,
-    hover: -1,
-    aiQueue: [],
-    aiTimer: 0,
-    stats: { plays: 0, resonance: 0 },
-    anim: {},
+    winner: null,
+    score: 0,
+    best: 0,
+    confetti: [],
+    cardsPlayed: 0,
+    damageDealt: 0,
+    reshuffles: 0,
   };
-  return state;
-}
-
-function loadBest() {
   try {
-    return Number(window.localStorage.getItem('ember-pact-best') || 0) || 0;
-  } catch {
-    return 0;
+    state.best = Number(window.localStorage.getItem('ember-pact-best') || 0) || 0;
+  } catch { state.best = 0; }
+
+  function log(line) {
+    state.log.unshift(line);
+    if (state.log.length > 6) state.log.length = 6;
   }
-}
 
-function saveBest(score) {
-  try {
-    window.localStorage.setItem('ember-pact-best', String(score));
-  } catch {
-    // Private mode or no storage: the score still shows this session.
+  function floater(text, x, y) {
+    state.floaters.push({ text, x, y, ttl: 1.6 });
   }
-}
 
-/** Start (or restart) a match from the title screen. */
-export function startMatch(state, seed) {
-  const fresh = createMatch(seed === undefined ? state.seed : seed);
-  fresh.screen = 'play';
-  fresh.log = ['The pact is sealed. Your move — play a card, then end your turn.'];
-  Object.assign(state, fresh);
-  return state;
-}
+  function announce(text) {
+    state.message = text;
+    state.messageTtl = 2.2;
+  }
 
-/** Add a line to the battle log, newest last, capped at eight. */
-export function addLog(state, line) {
-  state.log.push(line);
-  while (state.log.length > 8) state.log.shift();
-}
-
-/** A floating damage/heal number over the table. */
-function addFx(state, x, y, text, color) {
-  state.fx.push({ x, y, text, color, t: 0, life: 1.1 });
-  if (state.fx.length > 24) state.fx.shift();
-}
-
-/** Refill a side's ember to its (grown) maximum and draw a card. */
-function beginTurn(state, side) {
-  side.maxEmber = Math.min(EMBER_MAX, side.maxEmber + 1);
-  side.ember = side.maxEmber;
-  side.playsThisTurn = [];
-  side.playedThisTurn = [];
-  drawCards(side, state.rng, 1, HAND_MAX);
-}
-
-/** End the current turn and hand the table to the other duelist. */
-export function endTurn(state) {
-  if (state.screen !== 'play' || state.paused) return false;
-  if (state.turn === 'player') {
-    state.turn = 'rook';
-    beginTurn(state, state.rook);
-    addLog(state, 'Rook takes the table…');
-    queueRookTurn(state);
-  } else {
+  function startGame(newSeed) {
+    const sd = newSeed || state.seed;
+    state.seed = sd;
+    state.rng = makeRng(sd);
+    state.phase = 'play';
     state.turn = 'player';
-    state.turnCount++;
-    beginTurn(state, state.you);
-    addLog(state, `Turn ${state.turnCount} — your ember grows to ${state.you.maxEmber}.`);
+    state.turnNum = 1;
+    state.player = newSide(state.rng);
+    state.rook = newSide(state.rng);
+    state.played = { player: {}, rook: {} };
+    state.resonance = { player: false, rook: false };
+    state.log = [];
+    state.floaters = [];
+    state.message = '';
+    state.messageTtl = 0;
+    state.rookThinking = 0;
+    state.rookTaunt = null;
+    state.rookAim = null;
+    state.pendingStrike = null;
+    state.pendingRookStrike = null;
+    state.rookQueue = [];
+    state.rookTimer = 0;
+    state.paused = false;
+    state.winner = null;
+    state.score = 0;
+    state.confetti = [];
+    state.cardsPlayed = 0;
+    state.damageDealt = 0;
+    state.reshuffles = 0;
+    state.player.hand = drawFrom(state.player.pile, state.rng, HAND_SIZE);
+    state.rook.hand = drawFrom(state.rook.pile, state.rng, HAND_SIZE);
+    log('The pact is sealed. Your move, ember-bearer.');
   }
-  return true;
-}
 
-/** Plan Rook's whole turn as steps the updater plays out with pauses. */
-function queueRookTurn(state) {
-  const rook = state.rook;
-  const realHand = rook.hand;
-  const realEmber = rook.ember;
-  const scratchHand = realHand.map((c) => ({ uid: c.uid, id: c.id }));
-  let scratchEmber = realEmber;
-  const plan = [];
-  for (let guard = 0; guard < 8; guard++) {
-    rook.hand = scratchHand;
-    rook.ember = scratchEmber;
-    const choice = rookChoose(state);
-    if (choice.action === 'end') break;
-    const inst = scratchHand[choice.index];
-    if (!inst) break;
-    const card = cardDef(inst.id);
-    if (!card) break;
-    if (card.type === 'strike') {
-      plan.push({ kind: 'aim', cardId: card.id, text: rookIntentText(state, card) });
+  function drawFor(side, n) {
+    const s = side === 'player' ? state.player : state.rook;
+    const before = s.pile.drawPile.length;
+    const drawn = drawFrom(s.pile, state.rng, n);
+    if (s.pile.drawPile.length === 0 && s.pile.discardPile.length > 0) state.reshuffles++;
+    s.hand.push(...drawn);
+    return drawn;
+  }
+
+  function checkEnd() {
+    if (state.phase !== 'play') return true;
+    if (state.rook.life <= 0) {
+      state.rook.life = 0;
+      state.phase = 'win';
+      state.winner = 'player';
+      state.score = state.player.life * 100 + state.cardsPlayed * 15 + state.turnNum * 10;
+      if (state.score > state.best) {
+        state.best = state.score;
+        try { window.localStorage.setItem('ember-pact-best', String(state.best)); } catch { /* ignore */ }
+      }
+      state.confetti = Array.from({ length: 90 }, () => ({
+        x: state.rng() * 1280, y: -20 - state.rng() * 200,
+        v: 60 + state.rng() * 140, c: ['#e2482a', '#3f9e4d', '#2f7fd0', '#f2c14e'][Math.floor(state.rng() * 4)],
+        s: 5 + state.rng() * 7, r: state.rng() * Math.PI,
+      }));
+      log('Victory! Rook is broken.');
+      sfx.win();
+      return true;
     }
-    plan.push({ kind: 'play', cardId: card.id });
-    scratchEmber -= card.cost;
-    scratchHand.splice(choice.index, 1);
-  }
-  rook.hand = realHand;
-  rook.ember = realEmber;
-  state.aiQueue = plan;
-  state.aiTimer = 0.55;
-}
-
-function rookPlanHand(state) {
-  // Play Rook's turn instantly (screenshot autopilot): choose, play and
-  // end with no timers, using the same chooser the live game uses.
-  let guard = 0;
-  while (guard++ < 8) {
-    const choice = rookChoose(state);
-    if (choice.action === 'end') break;
-    playCard(state, state.rook, choice.index);
-    if (state.screen !== 'play') break;
-  }
-  if (state.screen === 'play' && state.turn === 'rook') endTurn(state);
-}
-
-/** Rook's whole turn, instantly, for screenshots and scripted tests. */
-export function rookTurnInstant(state) {
-  rookPlanHand(state);
-}
-
-/**
- * Play the hand card at `index` for `side`. Returns true when the card
- * was played. Handles cost, Resonance and the win check.
- */
-export function playCard(state, side, index) {
-  if (state.screen !== 'play' || state.paused) return false;
-  const inst = side.hand[index];
-  if (!inst) return false;
-  const card = cardDef(inst.id);
-  if (!card || card.cost > side.ember) return false;
-  side.hand.splice(index, 1);
-  side.ember -= card.cost;
-  state.stats.plays++;
-
-  const resonance = side.playsThisTurn.includes(card.element);
-  side.playsThisTurn.push(card.element);
-  const played = { card, resonance, target: null };
-  side.playedThisTurn.push(played);
-
-  if (card.type === 'strike') applyStrike(state, side, card, played);
-  else if (card.type === 'guardian') applyGuardian(state, side, card, played);
-  else applyTrick(state, side, card, played);
-
-  if (resonance) {
-    state.stats.resonance++;
-    state.banner = { text: `RESONANCE! ${card.element} +1` };
-    state.bannerT = 2.2;
-    addLog(state, `Resonance! Two ${card.element} cards — both strike +1 harder.`);
-    retroResonance(state, side, played);
-  }
-  discardCard(side, inst);
-  checkEnd(state);
-  return true;
-}
-
-/** The second same-element card also strengthens the first one played. */
-function retroResonance(state, side, played) {
-  const earlier = side.playedThisTurn.find((p) => p !== played && p.card.element === played.card.element);
-  if (!earlier) return;
-  const foe = side === state.you ? state.rook : state.you;
-  if (earlier.card.type === 'strike') {
-    dealDamage(state, foe, RESONANCE_BONUS, earlier.target);
-    addLog(state, `Resonance echoes: ${earlier.card.name} deals +1.`);
-  } else if (earlier.card.type === 'guardian') {
-    const g = side.guardians.find((x) => x.uid === earlier.guardianUid);
-    if (g) {
-      g.health += RESONANCE_BONUS;
-      addLog(state, `Resonance echoes: ${earlier.card.name} gains +1 health.`);
+    if (state.player.life <= 0) {
+      state.player.life = 0;
+      state.phase = 'loss';
+      state.winner = 'rook';
+      state.score = state.cardsPlayed * 15 + state.turnNum * 10;
+      log('Defeat. Rook takes the pact.');
+      sfx.lose();
+      return true;
     }
-  } else {
-    applyTrickBonus(state, side, earlier.card);
+    return false;
   }
-}
 
-function applyStrike(state, side, card, played) {
-  const foe = side === state.you ? state.rook : state.you;
-  const target = strikeTarget(state, foe);
-  let dmg = card.power + (played.resonance ? RESONANCE_BONUS : 0);
-  if (target && beatsElement(card.element, target.element)) dmg += ADVANTAGE_BONUS;
-  played.target = target ? 'guardian' : 'life';
-  const who = side === state.you ? 'You' : 'Rook';
-  if (target) {
-    target.health -= dmg;
-    addFx(state, 520, side === state.you ? 250 : 470, `-${dmg}`, '#ffd34d');
-    addLog(state, `${who} strike ${card.name} for ${dmg} on ${target.name} (${target.health} left).`);
-    if (target.health <= 0) {
-      foe.guardians = foe.guardians.filter((g) => g !== target);
-      addLog(state, `${target.name} shatters!`);
-    } else if (target.power > 0) {
-      // A standing guardian hits back for its power.
-      side.life -= target.power;
-      addFx(state, 520, side === state.you ? 470 : 250, `-${target.power}`, '#ff6a5e');
-      addLog(state, `${target.name} hits back for ${target.power}.`);
+  // Deal damage to a side: guardians soak first when no explicit target.
+  function dealDamage(targetSide, amount, source) {
+    const target = targetSide === 'player' ? state.player : state.rook;
+    if (target.guardians.length > 0) {
+      let gi = 0;
+      for (let i = 1; i < target.guardians.length; i++) {
+        if (target.guardians[i].health < target.guardians[gi].health) gi = i;
+      }
+      const g = target.guardians[gi];
+      g.health -= amount;
+      log(`${source} hits ${g.name} for ${amount}.`);
+      if (g.health <= 0) {
+        target.guardians.splice(gi, 1);
+        log(`${g.name} shatters!`);
+      }
+      sfx.hit();
+      return { hit: 'guardian', killed: g.health <= 0 };
     }
-  } else {
-    foe.life -= dmg;
-    addFx(state, 520, side === state.you ? 250 : 470, `-${dmg}`, '#ff6a5e');
-    addLog(state, `${who} strike ${card.name} for ${dmg} to the Life.`);
+    target.life = Math.max(0, target.life - amount);
+    if (targetSide === 'rook') state.damageDealt += amount;
+    log(`${source} hits ${targetSide === 'rook' ? 'Rook' : 'you'} for ${amount}.`);
+    sfx.hit();
+    return { hit: 'life', killed: target.life <= 0 };
   }
-}
 
-function applyGuardian(state, side, card, played) {
-  const guardian = {
-    uid: card.id + '-' + side.guardians.length + '-' + state.stats.plays,
-    id: card.id,
-    name: card.name,
-    element: card.element,
-    power: card.power,
-    health: card.health + (played.resonance ? RESONANCE_BONUS : 0),
+  // Deal damage to one chosen target (player strikes only).
+  function dealDamageTo(targetSide, kind, index, amount, source) {
+    const target = targetSide === 'player' ? state.player : state.rook;
+    if (kind === 'guardian') {
+      const g = target.guardians[index];
+      if (!g) return false;
+      g.health -= amount;
+      log(`${source} hits ${g.name} for ${amount}.`);
+      if (g.health <= 0) {
+        target.guardians.splice(index, 1);
+        log(`${g.name} shatters!`);
+      }
+      sfx.hit();
+      return true;
+    }
+    target.life = Math.max(0, target.life - amount);
+    if (targetSide === 'rook') state.damageDealt += amount;
+    log(`${source} hits ${targetSide === 'rook' ? 'Rook' : 'you'} for ${amount}.`);
+    sfx.hit();
+    return true;
+  }
+
+  function applyTrick(side, card) {
+    const me = side === 'player' ? state.player : state.rook;
+    const foe = side === 'player' ? state.rook : state.player;
+    const who = side === 'player' ? 'You' : 'Rook';
+    if (card.effect === 'draw2') {
+      drawFor(side, 2);
+      log(`${who} draw 2 cards.`);
+    } else if (card.effect === 'steal') {
+      if (foe.ember > 0) { foe.ember--; me.ember = Math.min(me.maxEmber, me.ember + 1); }
+      log(`${who} steal 1 ember.`);
+    } else if (card.effect === 'heal') {
+      me.life = Math.min(START_LIFE, me.life + 3);
+      log(`${who} heal 3 Life.`);
+    } else if (card.effect === 'drawEmber') {
+      drawFor(side, 1);
+      me.ember = Math.min(me.maxEmber, me.ember + 1);
+      log(`${who} draw 1 card, +1 ember.`);
+    }
+  }
+
+  function strikePower(side, card) {
+    const me = side === 'player' ? state.player : state.rook;
+    let power = card.power;
+    if (state.resonance[side]) power += RESONANCE_BONUS;
+    const foe = side === 'player' ? state.rook : state.player;
+    if (foe.lastElement && beats(card.element, foe.lastElement)) power += 2; // elemental advantage
+    return power;
+  }
+
+  function playCardInternal(side, handIndex) {
+    const me = side === 'player' ? state.player : state.rook;
+    const foe = side === 'player' ? state.rook : state.player;
+    const card = me.hand[handIndex];
+    if (!card || card.cost > me.ember) return null;
+    me.hand.splice(handIndex, 1);
+    me.ember -= card.cost;
+    state.cardsPlayed++;
+
+    // Elemental Charge: playing into the wind (your element loses to the
+    // foe's last played element) earns +1 Charge, max 3.
+    if (losesTo(card.element, foe.lastElement)) {
+      if (me.charge < MAX_CHARGE) {
+        me.charge++;
+        const msg = side === 'player'
+          ? 'CHARGE +1 — played into the wind!'
+          : 'Rook gains Charge — played into the wind!';
+        announce(msg);
+        floater('CHARGE +1', side === 'player' ? 640 : 640, side === 'player' ? 500 : 160);
+        log(msg);
+        sfx.charge();
+      }
+    }
+    me.lastElement = card.element;
+
+    // Resonance: second card of one element in a turn powers the turn up.
+    const counts = state.played[side];
+    counts[card.element] = (counts[card.element] || 0) + 1;
+    if (counts[card.element] >= 2 && !state.resonance[side]) {
+      state.resonance[side] = true;
+      log(`${side === 'player' ? 'You' : 'Rook'} trigger RESONANCE! +1 power.`);
+      sfx.resonance();
+    }
+
+    if (card.type === 'guardian') {
+      me.guardians.push(makeGuardian(card));
+      log(`${side === 'player' ? 'You summon' : 'Rook summons'} ${card.name}.`);
+      discardTo(me.pile, card);
+      sfx.play();
+      return { card, kind: 'guardian' };
+    }
+    if (card.type === 'trick') {
+      applyTrick(side, card);
+      discardTo(me.pile, card);
+      sfx.play();
+      return { card, kind: 'trick' };
+    }
+    // Strike: compute power, spend POWER if armed / if Rook wants it.
+    let power = strikePower(side, card);
+    if (side === 'player' && me.powerArmed) {
+      power += POWER_BONUS;
+      me.powerArmed = false;
+      log('POWER spent: +2 on this strike.');
+    }
+    if (side === 'rook' && rookWantsPower(state, card, power)) {
+      power += POWER_BONUS;
+      me.charge--;
+      log('Rook spends Charge: +2 POWER!');
+    }
+    discardTo(me.pile, card);
+    sfx.play();
+    return { card, kind: 'strike', power };
+  }
+
+  // Player plays a hand card. Strikes wait for a target click.
+  function playCard(handIndex) {
+    if (state.phase !== 'play' || state.turn !== 'player' || state.paused) return false;
+    if (state.pendingStrike) return false;
+    const result = playCardInternal('player', handIndex);
+    if (!result) return false;
+    if (result.kind === 'strike') {
+      state.pendingStrike = { card: result.card, power: result.power };
+      announce('Choose a target — click a Guardian or Rook.');
+    }
+    checkEnd();
+    return true;
+  }
+
+  function resolveStrike(kind, index) {
+    if (!state.pendingStrike) return false;
+    const { card, power } = state.pendingStrike;
+    if (kind === 'life' && state.rook.guardians.length > 0) {
+      log('A Guardian blocks the way — strike it first!');
+      announce('Guardian blocks! Strike a Guardian.');
+      return false;
+    }
+    state.pendingStrike = null;
+    dealDamageTo('rook', kind, index, power, card.name);
+    checkEnd();
+    return true;
+  }
+
+  function usePower() {
+    if (state.phase !== 'play' || state.turn !== 'player' || state.paused) return false;
+    const me = state.player;
+    if (me.charge < 1 || me.powerArmed) return false;
+    me.charge--;
+    me.powerArmed = true;
+    log('POWER armed: your next card gets +2.');
+    announce('POWER armed — next card +2!');
+    sfx.charge();
+    return true;
+  }
+
+  function useWard() {
+    if (state.phase !== 'play' || state.turn !== 'player' || state.paused) return false;
+    const me = state.player;
+    if (me.charge < 1 || me.wardArmed) return false;
+    me.charge--;
+    me.wardArmed = true;
+    log('WARD armed: Rook\u2019s next telegraphed strike will fizzle.');
+    announce('WARD armed — next Rook strike fizzles!');
+    sfx.ward();
+    return true;
+  }
+
+  function endTurn() {
+    if (state.phase !== 'play' || state.turn !== 'player' || state.paused) return false;
+    if (state.pendingStrike) return false;
+    state.player.powerArmed = false;
+    state.turn = 'rook';
+    state.played.rook = {};
+    state.resonance.rook = false;
+    const rook = state.rook;
+    rook.maxEmber = Math.min(MAX_EMBER, rook.maxEmber + 1);
+    rook.ember = rook.maxEmber;
+    drawFor('rook', 1);
+    log('Rook takes the turn...');
+    state.rookThinking = 0.8; // thinking beat before Rook acts
+    state.rookQueue = [];
+    state.rookTimer = 0;
+    return true;
+  }
+
+  function startPlayerTurn() {
+    state.turn = 'player';
+    state.turnNum++;
+    state.played.player = {};
+    state.resonance.player = false;
+    const p = state.player;
+    p.maxEmber = Math.min(MAX_EMBER, p.maxEmber + 1);
+    p.ember = p.maxEmber;
+    drawFor('player', 1);
+    log(`Turn ${state.turnNum} — your move. Ember ${p.ember}/${p.maxEmber}.`);
+  }
+
+  function rookPlayNext() {
+    if (state.rookQueue.length === 0) {
+      startPlayerTurn();
+      return;
+    }
+    const uid = state.rookQueue.shift();
+    const idx = state.rook.hand.findIndex((c) => c.uid === uid);
+    if (idx === -1) { state.rookTimer = 0.3; return; }
+    const card = state.rook.hand[idx];
+    // Thinking beat + taunt + charging glow before the card lands.
+    state.rookThinking = 0.45;
+    state.rookTaunt = { text: pickTaunt(state.rng, card.element), ttl: 1.5 };
+    const result = playCardInternal('rook', idx);
+    if (!result) { state.rookTimer = 0.3; return; }
+    if (result.kind === 'strike') {
+      // Telegraph: show the aim for a full second before it lands.
+      const target = state.player.guardians.length > 0 ? 'guardian' : 'life';
+      state.pendingRookStrike = { card: result.card, power: result.power };
+      state.rookAim = { kind: target, index: 0, ttl: 1.0, damage: result.power };
+      log(`Rook aims ${result.card.name} (${result.power})...`);
+    } else {
+      state.rookTimer = 0.9;
+    }
+    checkEnd();
+  }
+
+  function resolveRookStrike() {
+    const strike = state.pendingRookStrike;
+    const aim = state.rookAim;
+    state.pendingRookStrike = null;
+    state.rookAim = null;
+    if (!strike) return;
+    if (state.player.wardArmed) {
+      state.player.wardArmed = false;
+      log(`WARD! Rook\u2019s ${strike.card.name} fizzles — no damage.`);
+      announce('WARD! Rook\u2019s strike fizzles!');
+      sfx.ward();
+    } else if (aim && aim.kind === 'guardian') {
+      dealDamageTo('player', 'guardian', 0, strike.power, strike.card.name);
+    } else {
+      dealDamageTo('player', 'life', 0, strike.power, strike.card.name);
+    }
+    state.rookTimer = 0.9;
+    checkEnd();
+  }
+
+  function update(dt) {
+    if (state.paused) return;
+    if (state.messageTtl > 0) state.messageTtl -= dt;
+    if (state.rookTaunt) {
+      state.rookTaunt.ttl -= dt;
+      if (state.rookTaunt.ttl <= 0) state.rookTaunt = null;
+    }
+    for (const f of state.floaters) { f.ttl -= dt; f.y -= dt * 24; }
+    state.floaters = state.floaters.filter((f) => f.ttl > 0);
+    if (state.phase === 'win') {
+      for (const c of state.confetti) {
+        c.y += c.v * dt;
+        c.r += dt * 2;
+        if (c.y > 740) { c.y = -20; c.x = state.rng() * 1280; }
+      }
+    }
+    if (state.phase !== 'play' || state.turn !== 'rook') return;
+    if (state.rookAim) {
+      state.rookAim.ttl -= dt;
+      if (state.rookAim.ttl <= 0) resolveRookStrike();
+      return;
+    }
+    if (state.rookThinking > 0) {
+      state.rookThinking -= dt;
+      if (state.rookThinking <= 0) {
+        if (state.rookQueue.length === 0 && state.rookTimer === 0) {
+          state.rookQueue = planRookTurn(state).map((i) => state.rook.hand[i].uid);
+          state.rookTimer = 0.2;
+        } else if (state.rookQueue.length === 0) {
+          startPlayerTurn();
+        }
+      }
+      return;
+    }
+    if (state.rookTimer > 0) {
+      state.rookTimer -= dt;
+      if (state.rookTimer <= 0) rookPlayNext();
+    }
+  }
+
+  function togglePause() {
+    if (state.phase === 'play') state.paused = !state.paused;
+  }
+
+  function toggleMute() {
+    state.muted = !state.muted;
+    setMuted(state.muted);
+  }
+
+  startGame(state.seed);
+
+  return {
+    state,
+    startGame,
+    playCard,
+    resolveStrike,
+    endTurn,
+    usePower,
+    useWard,
+    update,
+    togglePause,
+    toggleMute,
+    log,
   };
-  played.guardianUid = guardian.uid;
-  side.guardians.push(guardian);
-  const who = side === state.you ? 'You summon' : 'Rook summons';
-  addLog(state, `${who} ${card.name} (${guardian.health} health).`);
-}
-
-function applyTrick(state, side, card, played) {
-  const foe = side === state.you ? state.rook : state.you;
-  const who = side === state.you ? 'You cast' : 'Rook casts';
-  const bonus = played.resonance ? RESONANCE_BONUS : 0;
-  if (card.effect === 'draw2') {
-    const n = drawCards(side, state.rng, 2 + bonus, HAND_MAX);
-    addLog(state, `${who} ${card.name} — draw ${n}.`);
-  } else if (card.effect === 'steal') {
-    const stolen = Math.min(1 + bonus, foe.ember);
-    foe.ember -= stolen;
-    side.ember = Math.min(side.maxEmber, side.ember + stolen);
-    addLog(state, `${who} ${card.name} — steal ${stolen} ember.`);
-  } else if (card.effect === 'heal3') {
-    side.life = Math.min(START_LIFE, side.life + 3 + bonus);
-    addLog(state, `${who} ${card.name} — restore ${3 + bonus} Life.`);
-  } else if (card.effect === 'draw-ember') {
-    drawCards(side, state.rng, 1 + bonus, HAND_MAX);
-    side.ember = Math.min(side.maxEmber, side.ember + 1 + bonus);
-    addLog(state, `${who} ${card.name} — draw 1, gain ${1 + bonus} ember.`);
-  }
-}
-
-/** A Trick's +1 when it is the earlier card of a Resonance pair. */
-function applyTrickBonus(state, side, card) {
-  if (card.effect === 'heal3') {
-    side.life = Math.min(START_LIFE, side.life + 1);
-    addLog(state, `Resonance echoes: ${card.name} heals +1.`);
-  } else if (card.effect === 'draw2' || card.effect === 'draw-ember') {
-    drawCards(side, state.rng, 1, HAND_MAX);
-    addLog(state, `Resonance echoes: ${card.name} draws +1.`);
-  }
-}
-
-/** Deal plain damage to a side's guardians-first target (resonance echo). */
-function dealDamage(state, foe, amount, targetKind) {
-  if (targetKind === 'guardian' && foe.guardians.length > 0) {
-    const target = strikeTarget(state, foe);
-    target.health -= amount;
-    if (target.health <= 0) foe.guardians = foe.guardians.filter((g) => g !== target);
-  } else {
-    foe.life -= amount;
-  }
-}
-
-/** Score a finished duel: surviving Life, speed and Resonance all count. */
-function computeScore(state) {
-  return (
-    state.you.life * 100 +
-    Math.max(0, 25 - state.turnCount) * 20 +
-    state.stats.resonance * 75 +
-    state.stats.plays * 5
-  );
-}
-
-/** Spawn the victory confetti from the seeded rng (deterministic shots). */
-function spawnConfetti(state) {
-  const colors = ['#e2483d', '#58a34b', '#3d7de2', '#ffd34d', '#ff9a8a', '#ffffff'];
-  state.particles = [];
-  for (let i = 0; i < 90; i++) {
-    state.particles.push({
-      x: 120 + state.rng() * 1040,
-      y: -20 - state.rng() * 160,
-      vx: (state.rng() - 0.5) * 60,
-      vy: 90 + state.rng() * 120,
-      size: 5 + state.rng() * 7,
-      color: colors[randInt(state.rng, colors.length)],
-      rot: state.rng() * Math.PI,
-      vr: (state.rng() - 0.5) * 6,
-    });
-  }
-}
-
-/** Decide whether the duel is over and settle the screen and score. */
-function checkEnd(state) {
-  if (state.screen !== 'play') return;
-  if (state.rook.life <= 0 && state.you.life <= 0) {
-    state.rook.life = 0;
-    state.you.life = 0;
-    state.winner = 'draw';
-    state.screen = 'win';
-    state.score = computeScore(state);
-  } else if (state.rook.life <= 0) {
-    state.rook.life = 0;
-    state.winner = 'you';
-    state.screen = 'win';
-    state.score = computeScore(state);
-    if (state.score > state.best) {
-      state.best = state.score;
-      saveBest(state.score);
-    }
-    spawnConfetti(state);
-    addLog(state, 'Victory! The pact is yours.');
-  } else if (state.you.life <= 0) {
-    state.you.life = 0;
-    state.winner = 'rook';
-    state.screen = 'loss';
-    state.score = computeScore(state);
-    addLog(state, 'Defeat. Rook keeps the embers.');
-  }
-}
-
-/**
- * Advance timers, floating numbers, confetti and Rook's queued steps.
- * Called with real frame time in play and with fixed 16 ms steps by the
- * screenshot stager, which is what keeps the shots deterministic.
- */
-export function update(state, dt) {
-  if (state.bannerT > 0) {
-    state.bannerT -= dt;
-    if (state.bannerT <= 0) state.banner = null;
-  }
-  for (const f of state.fx) f.t += dt;
-  state.fx = state.fx.filter((f) => f.t < f.life);
-  for (const p of state.particles) {
-    p.x += p.vx * dt;
-    p.y += p.vy * dt;
-    p.rot += p.vr * dt;
-    if (p.y > 740) {
-      p.y = -20;
-      p.x = 120 + state.rng() * 1040;
-    }
-  }
-  if (state.screen !== 'play' || state.paused || state.turn !== 'rook') return;
-  if (state.aim) {
-    state.aimT -= dt;
-    if (state.aimT <= 0) state.aim = null;
-    return;
-  }
-  if (state.aiQueue.length === 0) {
-    endTurn(state);
-    return;
-  }
-  state.aiTimer -= dt;
-  if (state.aiTimer > 0) return;
-  const step = state.aiQueue.shift();
-  if (step.kind === 'aim') {
-    state.aim = { index: step.index, text: step.text };
-    state.aimT = 1.0;
-    state.aiTimer = 0;
-    return;
-  }
-  // Play the planned card by id: the live hand may have shifted since
-  // planning, so find it rather than trusting the old index.
-  const idx = state.rook.hand.findIndex((c) => c.id === step.cardId);
-  if (idx >= 0) playCard(state, state.rook, idx);
-  state.aiTimer = 0.55;
 }
