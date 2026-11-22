@@ -1,84 +1,52 @@
-// Ember Pact — boot, frame loop and ?shot= mode.
-// The canvas is a fixed 1280x720 stage scaled by CSS. In normal play the
-// loop runs on requestAnimationFrame; with ?shot= the scene is staged,
-// settled with fixed 16 ms steps (so the image is deterministic), one
-// frame is drawn and window.__shotReady is set for the screenshot tool.
-// window.__ember exposes the live state for playtesting.
-import { VIEW_H, VIEW_W } from './config.js';
-import { createMatch, update } from './world.js';
+// Ember Pact — boot + game loop. Fixed 1280x720 canvas, scaled by CSS.
+// ?shot=title|play|win|loss stages a deterministic scene and sets
+// window.__shotReady once it has been drawn, for headless screenshots.
+
+import { W, H } from './config.js';
+import { createWorld } from './world.js';
 import { draw } from './render.js';
 import { attachInput } from './input.js';
-import { stageShot, stageTest } from './shots.js';
-
-const params = new URLSearchParams(window.location.search);
-const seed = Number(params.get('seed') || '7') || 7;
-const shot = params.get('shot');
-const test = params.get('test');
+import { stageShot } from './shots.js';
 
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
-canvas.width = VIEW_W;
-canvas.height = VIEW_H;
+canvas.width = W;
+canvas.height = H;
 
-const state = createMatch(seed);
+const params = new URLSearchParams(window.location.search);
+const shot = params.get('shot');
+const seed = Number(params.get('seed') || 7) || 7;
+
+const world = createWorld(seed);
+window.__world = world;
+window.__shotReady = false;
+
+attachInput(canvas, world);
+
 if (shot) {
-  stageShot(state, shot, seed);
-} else if (test) {
-  stageTest(state, test, seed);
-}
-attachInput(canvas, state);
-
-const statusEl = document.getElementById('status');
-let lastStatus = '';
-let lastTime = performance.now();
-
-function refreshDebug() {
-  window.__ember = {
-    screen: state.screen,
-    turn: state.turn,
-    turnCount: state.turnCount,
-    youLife: state.you.life,
-    rookLife: state.rook.life,
-    youEmber: state.you.ember,
-    youMaxEmber: state.you.maxEmber,
-    rookEmber: state.rook.ember,
-    youHand: state.you.hand.map((c) => c.id),
-    rookHand: state.rook.hand.length,
-    youGuardians: state.you.guardians.map((g) => `${g.id}:${g.health}`),
-    rookGuardians: state.rook.guardians.map((g) => `${g.id}:${g.health}`),
-    score: state.score,
-    best: state.best,
-    log: state.log.slice(-3),
+  stageShot(world, shot);
+  // Draw a few frames so canvas state settles, then signal readiness.
+  let frames = 0;
+  const tick = () => {
+    world.update(1 / 60);
+    draw(ctx, world.state);
+    frames++;
+    if (frames >= 3) {
+      window.__shotReady = true;
+    } else {
+      requestAnimationFrame(tick);
+    }
   };
-  const status =
-    state.screen === 'title'
-      ? 'Ember Pact title screen. Press Enter or click Start Duel.'
-      : state.screen === 'play'
-        ? `Turn ${state.turnCount}. Your life ${state.you.life}, Rook life ${state.rook.life}. Ember ${state.you.ember} of ${state.you.maxEmber}.`
-        : state.screen === 'win'
-          ? `Victory. Score ${state.score}.`
-          : `Defeat. Score ${state.score}.`;
-  if (status !== lastStatus) {
-    lastStatus = status;
-    if (statusEl) statusEl.textContent = status;
-  }
+  requestAnimationFrame(tick);
+} else {
+  world.state.phase = 'title';
+  let last = performance.now();
+  const loop = (now) => {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    world.update(dt);
+    draw(ctx, world.state);
+    requestAnimationFrame(loop);
+  };
+  requestAnimationFrame(loop);
 }
-
-function frame(now) {
-  const dt = Math.min(0.05, (now - lastTime) / 1000);
-  lastTime = now;
-  update(state, dt);
-  draw(ctx, state, now, { x: -1, y: -1 });
-  refreshDebug();
-  requestAnimationFrame(frame);
-}
-
-if (shot) {
-  // Settle every slide, aim and confetti burst with fixed steps, then
-  // draw once and announce the shot. The live loop keeps running after.
-  for (let i = 0; i < 24; i++) update(state, 0.016);
-  draw(ctx, state, performance.now(), { x: -1, y: -1 });
-  refreshDebug();
-  window.__shotReady = true;
-}
-requestAnimationFrame(frame);
