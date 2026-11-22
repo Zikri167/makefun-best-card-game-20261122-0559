@@ -1,7 +1,7 @@
-// Ember Pact — a tiny static server for local playtesting (Node 22,
-// standard library only). `node serve.ts` serves game/ on
-// http://localhost:8080; `--port <n>` picks another port. It answers
-// only files inside game/ and nothing else.
+// Ember Pact — tiny static dev server for game/ on http://localhost:8080.
+// Run `node serve.ts` (or `node serve.ts --port 8123`), then open the URL
+// in a browser. Serves only files under game/, nothing else.
+
 import { createReadStream, statSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { extname, join, normalize, resolve, sep } from 'node:path';
