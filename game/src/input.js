@@ -1,70 +1,82 @@
-// Ember Pact — mouse and keyboard.
-// Click a hand card to play it, click END TURN (or Space) to pass, keys
-// 1-5 play from the hand, R restarts, M mutes, P pauses. Every gesture
-// also wakes the synth, so the first click is what arms the sound.
-import { VIEW_H, VIEW_W } from './config.js';
-import { endTurn, playCard, startMatch } from './world.js';
-import { hitTest, hoverTest } from './render.js';
-import { initAudio, toggleMute } from './audio.js';
+// Ember Pact — mouse + keyboard input. Clicks are mapped through the same
+// rect helpers the renderer uses, so a button is clickable exactly where
+// it is drawn. Keys: 1-5 play a hand card, Q POWER, W WARD, Space end turn,
+// R restart, M mute, P pause, Enter start / play again.
 
-function toCanvas(canvas, event) {
-  const rect = canvas.getBoundingClientRect();
-  return {
-    x: ((event.clientX - rect.left) / rect.width) * VIEW_W,
-    y: ((event.clientY - rect.top) / rect.height) * VIEW_H,
-  };
+import { W, H, LAYOUT } from './config.js';
+import {
+  handCardRect, rookGuardianRect, playerGuardianRect,
+  rookLifeRect, playerLifeRect,
+} from './render.js';
+
+function inside(x, y, r) {
+  return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
 }
 
-/** Wire the canvas and the keyboard to one match state. */
-export function attachInput(canvas, state) {
-  canvas.addEventListener('pointermove', (event) => {
-    const p = toCanvas(canvas, event);
-    state.hover = hoverTest(state, p.x, p.y);
-  });
-  canvas.addEventListener('pointerleave', () => {
-    state.hover = -1;
-  });
-  canvas.addEventListener('pointerdown', (event) => {
-    initAudio(state);
-    const p = toCanvas(canvas, event);
-    const hit = hitTest(state, p.x, p.y);
-    if (!hit) return;
-    if (hit.kind === 'start' || hit.kind === 'again') {
-      startMatch(state, state.seed);
-    } else if (hit.kind === 'end-turn') {
-      endTurn(state);
-    } else if (hit.kind === 'card') {
-      playCard(state, state.you, hit.index);
-    }
-  });
-  window.addEventListener('keydown', (event) => {
-    if (event.repeat) return;
-    initAudio(state);
-    const key = event.key;
-    if (key === 'm' || key === 'M') {
-      state.muted = toggleMute(state);
+export function attachInput(canvas, world) {
+  function toGame(e) {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: ((e.clientX - rect.left) / rect.width) * W,
+      y: ((e.clientY - rect.top) / rect.height) * H,
+    };
+  }
+
+  canvas.addEventListener('click', (e) => {
+    const { x, y } = toGame(e);
+    const s = world.state;
+    if (s.phase === 'title') {
+      if (inside(x, y, LAYOUT.startBtn)) world.startGame();
       return;
     }
-    if (key === 'p' || key === 'P') {
-      if (state.screen === 'play') state.paused = !state.paused;
+    if (s.phase === 'win' || s.phase === 'loss') {
+      if (inside(x, y, LAYOUT.againBtn)) world.startGame();
       return;
     }
-    if (key === 'r' || key === 'R') {
-      if (state.screen !== 'title') startMatch(state, state.seed);
+    if (s.phase !== 'play' || s.paused) return;
+
+    // A pending strike needs a target first: a Rook guardian, or Rook life.
+    if (s.pendingStrike) {
+      for (let i = 0; i < s.rook.guardians.length; i++) {
+        if (inside(x, y, rookGuardianRect(i, s.rook.guardians.length))) {
+          world.resolveStrike('guardian', i);
+          return;
+        }
+      }
+      if (inside(x, y, rookLifeRect())) {
+        world.resolveStrike('life', 0);
+        return;
+      }
       return;
     }
-    if (key === ' ' || key === 'Enter') {
-      event.preventDefault();
-      if (state.screen === 'title') startMatch(state, state.seed);
-      else if (state.screen === 'win' || state.screen === 'loss') startMatch(state, state.seed);
-      else if (state.screen === 'play' && state.turn === 'player') endTurn(state);
-      return;
-    }
-    if (key >= '1' && key <= '5') {
-      const index = Number(key) - 1;
-      if (state.screen === 'play' && state.turn === 'player') {
-        playCard(state, state.you, index);
+
+    if (inside(x, y, LAYOUT.endTurn)) { world.endTurn(); return; }
+    if (inside(x, y, LAYOUT.powerBtn)) { world.usePower(); return; }
+    if (inside(x, y, LAYOUT.wardBtn)) { world.useWard(); return; }
+
+    for (let i = 0; i < s.player.hand.length; i++) {
+      if (inside(x, y, handCardRect(i, s.player.hand.length))) {
+        world.playCard(i);
+        return;
       }
     }
+    // Clicking a player guardian does nothing; it is only a shield.
+    void playerGuardianRect;
+    void playerLifeRect;
+  });
+
+  window.addEventListener('keydown', (e) => {
+    const s = world.state;
+    if (e.code === 'KeyM') { world.toggleMute(); return; }
+    if (e.code === 'KeyP') { world.togglePause(); return; }
+    if (s.phase === 'title' && (e.code === 'Enter' || e.code === 'Space')) { world.startGame(); return; }
+    if ((s.phase === 'win' || s.phase === 'loss') && (e.code === 'Enter' || e.code === 'KeyR')) { world.startGame(); return; }
+    if (s.phase !== 'play' || s.paused) return;
+    if (e.code === 'KeyR') { world.startGame(); return; }
+    if (e.code === 'Space') { e.preventDefault(); world.endTurn(); return; }
+    if (e.code === 'KeyQ') { world.usePower(); return; }
+    if (e.code === 'KeyW') { world.useWard(); return; }
+    const digit = ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5'].indexOf(e.code);
+    if (digit >= 0 && digit < s.player.hand.length) world.playCard(digit);
   });
 }
