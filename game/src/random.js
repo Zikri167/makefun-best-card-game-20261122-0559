@@ -1,8 +1,8 @@
-// Ember Pact — seeded random numbers.
-// One tiny generator (mulberry32) drives every shuffle, AI coin-flip and
-// confetti burst, so a match started from a seed plays the same way every
-// time and the screenshot scenes are reproducible.
-export function mulberry32(seed) {
+// Ember Pact — deterministic seeded RNG (mulberry32). Every shuffle and
+// every AI tie-break draws from this stream, never from Math.random, so a
+// fixed seed replays the same match and the same screenshots.
+
+export function makeRng(seed) {
   let a = seed >>> 0;
   return function next() {
     a |= 0;
@@ -13,18 +13,22 @@ export function mulberry32(seed) {
   };
 }
 
-/** Integer in [0, max) from rng. */
-export function randInt(rng, max) {
-  return Math.floor(rng() * max);
+export function rngInt(rng, min, max) {
+  return min + Math.floor(rng() * (max - min + 1));
 }
 
-/** Fisher-Yates shuffle in place, driven by rng. Returns the same array. */
+export function rngPick(rng, list) {
+  return list[Math.floor(rng() * list.length)];
+}
+
+// Fisher-Yates shuffle driven by the seeded stream.
 export function shuffle(rng, arr) {
-  for (let i = arr.length - 1; i > 0; i--) {
-    const j = randInt(rng, i + 1);
-    const tmp = arr[i];
-    arr[i] = arr[j];
-    arr[j] = tmp;
+  const out = arr.slice();
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    const tmp = out[i];
+    out[i] = out[j];
+    out[j] = tmp;
   }
-  return arr;
+  return out;
 }
