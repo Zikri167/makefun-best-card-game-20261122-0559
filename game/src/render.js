@@ -1,39 +1,50 @@
-// Ember Pact — all canvas drawing: the wooden table, both hands, guardians,
-// life bars, Charge pips, POWER/WARD buttons, the always-on legend, the
-// compact Resonance badge, taunts, telegraphs, and the title/win/loss
-// screens. Rect helpers are exported so input clicks land on what is drawn.
+// Ember Pact — renderer. Draws the table, cards, panels, legend, banners
+// and end screens on a fixed 1280x720 canvas. Pure drawing: it never
+// changes game state, it only reads world.state. The rect helpers below
+// are the single source of truth for clickable areas (input.js imports
+// them), so a button is clickable exactly where it is drawn.
 
 import {
-  W, H, LAYOUT, ELEMENT_COLOR, ELEMENT_DARK, ELEMENT_GLYPH, ELEMENT_NAME,
-  START_LIFE, MAX_CHARGE,
+  W, H, LAYOUT, ELEMENT_COLOR, ELEMENT_DARK, ELEMENT_GLYPH,
+  ELEMENT_NAME, MAX_CHARGE,
 } from './config.js';
+import { CARD_DEFS } from './cards.js';
+import { makeRng } from './random.js';
 
-export function handCardRect(i, n) {
-  const total = n * LAYOUT.handCardW + (n - 1) * LAYOUT.handGap;
-  const x = (W - total) / 2 + i * (LAYOUT.handCardW + LAYOUT.handGap);
-  return { x, y: LAYOUT.handY, w: LAYOUT.handCardW, h: LAYOUT.handCardH };
+// ---------------------------------------------------------------- rects --
+// Hand cards are centred on the table; guardians likewise.
+export function handCardRect(i, count) {
+  const total = count * LAYOUT.handCardW + (count - 1) * LAYOUT.handGap;
+  const x0 = (W - total) / 2;
+  return {
+    x: x0 + i * (LAYOUT.handCardW + LAYOUT.handGap),
+    y: LAYOUT.handY,
+    w: LAYOUT.handCardW,
+    h: LAYOUT.handCardH,
+  };
 }
 
-export function rookGuardianRect(i, n) {
-  const total = n * LAYOUT.guardW + (n - 1) * 10;
-  const x = (W - total) / 2 + i * (LAYOUT.guardW + 10);
-  return { x, y: LAYOUT.rookGuardY, w: LAYOUT.guardW, h: LAYOUT.guardH };
+export function rookGuardianRect(i, count) {
+  const total = count * LAYOUT.guardW + (count - 1) * 10;
+  const x0 = (W - total) / 2;
+  return { x: x0 + i * (LAYOUT.guardW + 10), y: LAYOUT.rookGuardY, w: LAYOUT.guardW, h: LAYOUT.guardH };
 }
 
-export function playerGuardianRect(i, n) {
-  const total = n * LAYOUT.guardW + (n - 1) * 10;
-  const x = (W - total) / 2 + i * (LAYOUT.guardW + 10);
-  return { x, y: LAYOUT.playerGuardY, w: LAYOUT.guardW, h: LAYOUT.guardH };
+export function playerGuardianRect(i, count) {
+  const total = count * LAYOUT.guardW + (count - 1) * 10;
+  const x0 = (W - total) / 2;
+  return { x: x0 + i * (LAYOUT.guardW + 10), y: LAYOUT.playerGuardY, w: LAYOUT.guardW, h: LAYOUT.guardH };
 }
 
 export function rookLifeRect() {
-  return { x: 24, y: 52, w: 220, h: 22 };
+  return { x: 24, y: 40, w: 220, h: 18 };
 }
 
 export function playerLifeRect() {
-  return { x: 24, y: 586, w: 220, h: 22 };
+  return { x: 24, y: 476, w: 220, h: 18 };
 }
 
+// ------------------------------------------------------------- helpers --
 function rr(ctx, x, y, w, h, r) {
   ctx.beginPath();
   ctx.moveTo(x + r, y);
@@ -44,384 +55,646 @@ function rr(ctx, x, y, w, h, r) {
   ctx.closePath();
 }
 
-function text(ctx, s, x, y, size, color, align, weight) {
-  ctx.fillStyle = color || '#fff';
-  ctx.font = `${weight || 'bold'} ${size}px sans-serif`;
+function circle(ctx, x, y, r) {
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
+}
+
+function wrapText(ctx, text, maxW) {
+  const words = String(text).split(' ');
+  const lines = [];
+  let line = '';
+  for (const word of words) {
+    const test = line ? line + ' ' + word : word;
+    if (ctx.measureText(test).width > maxW && line) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = test;
+    }
+  }
+  if (line) lines.push(line);
+  return lines.slice(0, 2);
+}
+
+function text(ctx, str, x, y, font, color, align) {
+  ctx.font = font;
+  ctx.fillStyle = color;
   ctx.textAlign = align || 'left';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(s, x, y);
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillText(str, x, y);
 }
 
-function drawTable(ctx) {
-  ctx.fillStyle = '#3a2417';
-  ctx.fillRect(0, 0, W, H);
-  ctx.fillStyle = '#1e5c38';
-  rr(ctx, 14, 14, W - 28, H - 28, 26);
-  ctx.fill();
-  ctx.strokeStyle = '#c9a35c';
-  ctx.lineWidth = 3;
-  ctx.stroke();
-  ctx.strokeStyle = 'rgba(201,163,92,0.35)';
-  ctx.lineWidth = 1;
-  rr(ctx, 30, 30, W - 60, H - 60, 18);
-  ctx.stroke();
-}
-
-function drawCardFace(ctx, x, y, w, h, card, opts) {
+// ------------------------------------------------------- card drawing --
+function drawCardFace(ctx, card, x, y, w, h, opts) {
   const o = opts || {};
   const col = ELEMENT_COLOR[card.element];
   const dark = ELEMENT_DARK[card.element];
   ctx.save();
-  if (o.glow) {
-    ctx.shadowColor = '#ffd94e';
-    ctx.shadowBlur = 22;
-  }
-  rr(ctx, x, y, w, h, 10);
-  ctx.fillStyle = '#f7f0dd';
+  if (o.alpha != null) ctx.globalAlpha = o.alpha;
+  if (o.dim) ctx.globalAlpha *= 0.55;
+  rr(ctx, x, y, w, h, 8);
+  ctx.fillStyle = '#f6efdc';
   ctx.fill();
-  ctx.shadowBlur = 0;
-  ctx.lineWidth = o.selected ? 4 : 2;
-  ctx.strokeStyle = o.selected ? '#ffd94e' : dark;
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = col;
   ctx.stroke();
   // Element header band.
-  rr(ctx, x + 4, y + 4, w - 8, 30, 7);
+  rr(ctx, x + 2, y + 2, w - 4, 22, 6);
   ctx.fillStyle = col;
   ctx.fill();
-  text(ctx, ELEMENT_NAME[card.element].toUpperCase(), x + w / 2, y + 20, 13, '#fff', 'center');
-  // Cost orb.
-  ctx.beginPath();
-  ctx.arc(x + 20, y + 52, 14, 0, Math.PI * 2);
-  ctx.fillStyle = '#2b4a8f';
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 12px Georgia, serif';
+  ctx.textAlign = 'left';
+  ctx.fillText(ELEMENT_GLYPH[card.element], x + 8, y + 18);
+  ctx.textAlign = 'right';
+  ctx.font = '11px Georgia, serif';
+  ctx.fillText(ELEMENT_NAME[card.element], x + w - 8, y + 18);
+  // Cost orb, top-left overlapping the band.
+  circle(ctx, x + 15, y + 15, 12);
+  ctx.fillStyle = '#f2c14e';
   ctx.fill();
-  ctx.strokeStyle = '#fff';
   ctx.lineWidth = 2;
+  ctx.strokeStyle = '#7a5a12';
   ctx.stroke();
-  text(ctx, String(card.cost), x + 20, y + 53, 15, '#fff', 'center');
-  // Big element glyph.
-  text(ctx, ELEMENT_GLYPH[card.element], x + w / 2, y + 78, 40, col, 'center');
+  text(ctx, String(card.cost), x + 15, y + 20, 'bold 14px Georgia, serif', '#3a2a08', 'center');
   // Name + type.
-  text(ctx, card.name, x + w / 2, y + 108, 12, '#241a12', 'center');
-  text(ctx, card.type.toUpperCase(), x + w / 2, y + 124, 10, '#7a6a55', 'center');
-  ctx.restore();
-}
-
-function drawHandCard(ctx, card, rect, opts) {
-  drawCardFace(ctx, rect.x, rect.y, rect.w, rect.h, card, opts);
-  const o = opts || {};
-  if (card.type === 'strike') {
-    text(ctx, `⚔ ${card.power}`, rect.x + rect.w - 10, rect.y + rect.h - 12, 15, '#a11f10', 'right');
-  } else if (card.type === 'guardian') {
-    text(ctx, `♥ ${card.power + 3}`, rect.x + rect.w - 10, rect.y + rect.h - 12, 15, '#1d5c28', 'right');
-  } else {
-    text(ctx, card.text, rect.x + 8, rect.y + rect.h - 12, 9, '#5a4a35', 'left');
+  const nameSize = w >= 100 ? 13 : w >= 70 ? 11 : 9;
+  text(ctx, card.name, x + w / 2, y + 46, 'bold ' + nameSize + 'px Georgia, serif', '#2a1c10', 'center');
+  if (w >= 70) {
+    text(ctx, card.type.toUpperCase(), x + w / 2, y + 62, '10px sans-serif', '#6b543a', 'center');
   }
-  if (o.dim) {
-    ctx.fillStyle = 'rgba(20,20,20,0.45)';
-    rr(ctx, rect.x, rect.y, rect.w, rect.h, 10);
+  // Big element glyph.
+  const glyphSize = w >= 100 ? 30 : w >= 70 ? 22 : 15;
+  text(ctx, ELEMENT_GLYPH[card.element], x + w / 2, y + (w >= 100 ? 96 : 88), glyphSize + 'px Georgia, serif', col, 'center');
+  // Effect text (full-size cards only).
+  if (w >= 100 && card.text) {
+    ctx.font = '10px sans-serif';
+    const lines = wrapText(ctx, card.text, w - 16);
+    lines.forEach((ln, i) => {
+      text(ctx, ln, x + w / 2, y + 116 + i * 13, '10px sans-serif', '#4a3a28', 'center');
+    });
+  }
+  // Power orb (strike / guardian) or a star for tricks.
+  if (card.type === 'strike' || card.type === 'guardian') {
+    circle(ctx, x + w - 17, y + h - 17, 12);
+    ctx.fillStyle = col;
     ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = dark;
+    ctx.stroke();
+    text(ctx, String(card.power), x + w - 17, y + h - 12, 'bold 14px Georgia, serif', '#fff', 'center');
+  } else if (w >= 70) {
+    text(ctx, '✦', x + w - 17, y + h - 12, '16px Georgia, serif', '#b98a1d', 'center');
   }
+  ctx.restore();
 }
 
 function drawCardBack(ctx, x, y, w, h) {
-  rr(ctx, x, y, w, h, 8);
-  ctx.fillStyle = '#5c2a1a';
+  rr(ctx, x, y, w, h, 7);
+  ctx.fillStyle = '#6e1f1f';
   ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = '#c9a35c';
+  ctx.stroke();
+  rr(ctx, x + 5, y + 5, w - 10, h - 10, 5);
+  ctx.strokeStyle = 'rgba(201,163,92,0.7)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  ctx.save();
+  ctx.translate(x + w / 2, y + h / 2);
+  ctx.rotate(Math.PI / 4);
   ctx.strokeStyle = '#c9a35c';
   ctx.lineWidth = 2;
-  ctx.stroke();
-  rr(ctx, x + 6, y + 6, w - 12, h - 12, 5);
-  ctx.strokeStyle = '#e2482a';
-  ctx.stroke();
-  text(ctx, '✦', x + w / 2, y + h / 2, 26, '#f2c14e', 'center');
+  ctx.strokeRect(-11, -11, 22, 22);
+  ctx.restore();
+  text(ctx, '✦', x + w / 2, y + h / 2 + 5, '15px Georgia, serif', '#f2c14e', 'center');
 }
 
-function drawLifeBar(ctx, x, y, w, h, life, label) {
-  rr(ctx, x, y, w, h, 8);
-  ctx.fillStyle = '#1a1a1a';
-  ctx.fill();
-  const frac = Math.max(0, life / START_LIFE);
-  if (frac > 0) {
-    rr(ctx, x + 2, y + 2, (w - 4) * frac, h - 4, 6);
-    ctx.fillStyle = frac > 0.5 ? '#e2482a' : frac > 0.25 ? '#e07b2a' : '#c0392b';
-    ctx.fill();
-  }
-  text(ctx, `${label}  ♥ ${life}`, x + w / 2, y + h / 2, 13, '#fff', 'center');
-}
-
-function drawChargePips(ctx, x, y, charge, label) {
-  text(ctx, label, x, y, 12, '#f2c14e', 'left');
-  for (let i = 0; i < MAX_CHARGE; i++) {
-    ctx.beginPath();
-    ctx.arc(x + 62 + i * 22, y, 8, 0, Math.PI * 2);
-    ctx.fillStyle = i < charge ? '#f2c14e' : 'rgba(255,255,255,0.18)';
-    ctx.fill();
-    ctx.strokeStyle = '#c9a35c';
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-    if (i < charge) text(ctx, '⚡', x + 62 + i * 22, y + 0.5, 11, '#5c2a1a', 'center');
-  }
-}
-
-function drawButton(ctx, rect, label, enabled, active) {
-  rr(ctx, rect.x, rect.y, rect.w, rect.h, 8);
-  ctx.fillStyle = active ? '#f2c14e' : enabled ? '#2b4a8f' : 'rgba(120,120,120,0.55)';
-  ctx.fill();
-  ctx.strokeStyle = active ? '#fff' : '#c9a35c';
-  ctx.lineWidth = 2;
-  ctx.stroke();
-  text(ctx, label, rect.x + rect.w / 2, rect.y + rect.h / 2 + 1, 14, active ? '#3a2417' : '#fff', 'center');
-}
-
-function drawGuardian(ctx, g, rect, aimed) {
+function drawGuardian(ctx, g, x, y, w, h, ghost) {
   const col = ELEMENT_COLOR[g.element];
   const dark = ELEMENT_DARK[g.element];
   ctx.save();
-  if (aimed) {
-    ctx.shadowColor = '#ffd94e';
-    ctx.shadowBlur = 24;
-  }
-  rr(ctx, rect.x, rect.y, rect.w, rect.h, 10);
-  ctx.fillStyle = '#f7f0dd';
+  if (ghost) ctx.globalAlpha = 0.9;
+  rr(ctx, x, y, w, h, 8);
+  ctx.fillStyle = '#f6efdc';
   ctx.fill();
-  ctx.shadowBlur = 0;
-  ctx.lineWidth = aimed ? 4 : 2;
-  ctx.strokeStyle = aimed ? '#ffd94e' : dark;
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = col;
   ctx.stroke();
-  rr(ctx, rect.x + 4, rect.y + 4, rect.w - 8, 26, 6);
-  ctx.fillStyle = col;
+  text(ctx, g.name, x + w / 2, y + 20, 'bold 12px Georgia, serif', '#2a1c10', 'center');
+  text(ctx, ELEMENT_GLYPH[g.element] + ' GUARDIAN', x + w / 2, y + 38, '10px sans-serif', '#6b543a', 'center');
+  text(ctx, ELEMENT_GLYPH[g.element], x + w / 2, y + 72, '26px Georgia, serif', col, 'center');
+  // Health bar.
+  const bw = w - 24;
+  rr(ctx, x + 12, y + h - 30, bw, 10, 5);
+  ctx.fillStyle = '#2a1c10';
   ctx.fill();
-  text(ctx, 'GUARDIAN', rect.x + rect.w / 2, rect.y + 18, 11, '#fff', 'center');
-  text(ctx, ELEMENT_GLYPH[g.element], rect.x + rect.w / 2, rect.y + 58, 34, col, 'center');
-  text(ctx, g.name, rect.x + rect.w / 2, rect.y + 86, 11, '#241a12', 'center');
-  rr(ctx, rect.x + 8, rect.y + rect.h - 20, rect.w - 16, 12, 5);
-  ctx.fillStyle = '#ddd';
-  ctx.fill();
-  rr(ctx, rect.x + 8, rect.y + rect.h - 20, (rect.w - 16) * Math.max(0, g.health / g.maxHealth), 12, 5);
-  ctx.fillStyle = '#3f9e4d';
-  ctx.fill();
-  text(ctx, `♥ ${g.health}/${g.maxHealth}`, rect.x + rect.w / 2, rect.y + rect.h - 13, 10, '#12351a', 'center');
-  ctx.restore();
-  if (aimed) {
-    rr(ctx, rect.x - 6, rect.y - 30, rect.w + 12, 24, 6);
-    ctx.fillStyle = '#ffd94e';
+  const frac = Math.max(0, g.health / g.maxHealth);
+  if (frac > 0) {
+    rr(ctx, x + 12, y + h - 30, bw * frac, 10, 5);
+    ctx.fillStyle = frac > 0.5 ? '#3f9e4d' : '#e2482a';
     ctx.fill();
-    text(ctx, 'ROOK AIMS HERE', rect.x + rect.w / 2, rect.y - 17, 11, '#3a2417', 'center');
   }
+  text(ctx, 'HP ' + g.health + '/' + g.maxHealth, x + w / 2, y + h - 8, '11px sans-serif', '#2a1c10', 'center');
+  text(ctx, 'PWR ' + g.power, x + w / 2, y + h - 44, 'bold 12px Georgia, serif', dark, 'center');
+  ctx.restore();
+}
+
+// ------------------------------------------------- centre table dressing --
+// The pact circle, drifting ember sparks and the last-play slot live in
+// the empty band between the two guardian rows. All three stay quiet:
+// thin dim gold, tiny lights, one small ghost card — never louder than
+// the hand, the guardians or the buttons.
+let frame = 0;
+let sparkCache = { seed: null, sparks: [] };
+
+function getSparks(seed) {
+  if (sparkCache.seed === seed) return sparkCache.sparks;
+  const rng = makeRng((seed * 1013 + 7) >>> 0);
+  const sparks = [];
+  for (let i = 0; i < 16; i++) {
+    const a = rng() * Math.PI * 2;
+    const r = 46 + rng() * 150;
+    sparks.push({
+      dx: Math.cos(a) * r,
+      dy: Math.sin(a) * r * 0.62,
+      s: 1.5 + rng() * 2,
+      ph: rng() * Math.PI * 2,
+      sp: 0.6 + rng() * 1.1,
+    });
+  }
+  sparkCache = { seed, sparks };
+  return sparks;
+}
+
+function drawPactCircle(ctx, cx, cy) {
+  ctx.save();
+  circle(ctx, cx, cy, 82);
+  ctx.strokeStyle = 'rgba(201,163,92,0.30)';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  circle(ctx, cx, cy, 70);
+  ctx.strokeStyle = 'rgba(201,163,92,0.18)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  // Three faint element glyphs riding the ring.
+  const glyphs = ['▲', '✦', '●'];
+  const cols = [ELEMENT_COLOR.flame, ELEMENT_COLOR.thorn, ELEMENT_COLOR.tide];
+  for (let i = 0; i < 3; i++) {
+    const a = -Math.PI / 2 + (i * Math.PI * 2) / 3;
+    ctx.globalAlpha = 0.28;
+    text(ctx, glyphs[i], cx + Math.cos(a) * 76, cy + Math.sin(a) * 76 + 5,
+      '14px Georgia, serif', cols[i], 'center');
+  }
+  ctx.restore();
+}
+
+function drawSparks(ctx, seed, cx, cy) {
+  const sparks = getSparks(seed);
+  ctx.save();
+  for (const sp of sparks) {
+    const bob = Math.sin(frame * 0.02 * sp.sp + sp.ph) * 6;
+    const tw = 0.35 + 0.35 * (0.5 + 0.5 * Math.sin(frame * 0.03 * sp.sp + sp.ph * 2));
+    circle(ctx, cx + sp.dx, cy + sp.dy + bob, sp.s);
+    ctx.fillStyle = 'rgba(242,150,60,' + tw.toFixed(2) + ')';
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+// The most recently played card, remembered across draws (the discard
+// piles only grow, and the turn counters say whose play was last).
+let lastPlayed = null;
+
+function currentLastPlay(state) {
+  const p = state.player;
+  const r = state.rook;
+  if (!p || !r) return null;
+  const pLast = p.pile.discardPile[p.pile.discardPile.length - 1] || null;
+  const rLast = r.pile.discardPile[r.pile.discardPile.length - 1] || null;
+  const pPlayed = Object.values(state.played.player).reduce((a, b) => a + b, 0);
+  if (state.turn === 'rook') return rLast || pLast;
+  if (pPlayed > 0) return pLast || rLast;
+  return rLast || pLast;
+}
+
+function drawLastPlaySlot(ctx, state) {
+  const cx = 640;
+  const cy = 360;
+  if (state.turnNum === 1 && state.cardsPlayed === 0) lastPlayed = null;
+  const cur = currentLastPlay(state);
+  if (cur) lastPlayed = { name: cur.name, element: cur.element, type: cur.type, cost: cur.cost, power: cur.power, text: cur.text, effect: cur.effect || null };
+  drawPactCircle(ctx, cx, cy);
+  drawSparks(ctx, state.seed, cx, cy);
+  const w = 56;
+  const h = 74;
+  const x = cx - w / 2;
+  const y = cy - h / 2;
+  if (lastPlayed) {
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.45)';
+    ctx.shadowBlur = 10;
+    ctx.shadowOffsetY = 3;
+    drawCardFace(ctx, lastPlayed, x, y, w, h, { alpha: 0.88 });
+    ctx.restore();
+    rr(ctx, x - 2, y - 2, w + 4, h + 4, 9);
+    ctx.strokeStyle = 'rgba(242,193,78,0.55)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  } else {
+    ctx.save();
+    ctx.setLineDash([4, 4]);
+    rr(ctx, x, y, w, h, 8);
+    ctx.strokeStyle = 'rgba(201,163,92,0.4)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.restore();
+  }
+  text(ctx, 'LAST PLAY', cx, cy + h / 2 + 15, '9px sans-serif', 'rgba(216,207,174,0.75)', 'center');
+}
+
+// ------------------------------------------------------------- panels --
+function drawLifeBar(ctx, x, y, life, maxLife) {
+  rr(ctx, x, y, 220, 18, 9);
+  ctx.fillStyle = '#1c130c';
+  ctx.fill();
+  const frac = Math.max(0, life / maxLife);
+  if (frac > 0) {
+    rr(ctx, x, y, 220 * frac, 18, 9);
+    ctx.fillStyle = frac > 0.5 ? '#c0392b' : '#e2482a';
+    ctx.fill();
+  }
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = '#c9a35c';
+  rr(ctx, x, y, 220, 18, 9);
+  ctx.stroke();
+  text(ctx, '♥ ' + life + '/' + maxLife, x + 228, y + 14, 'bold 13px Georgia, serif', '#f2c14e', 'left');
+}
+
+function drawEmberPips(ctx, x, y, ember, maxEmber) {
+  for (let i = 0; i < maxEmber; i++) {
+    const px = x + i * 16;
+    ctx.save();
+    ctx.translate(px + 6, y + 6);
+    ctx.rotate(Math.PI / 4);
+    ctx.fillStyle = i < ember ? '#f2963c' : 'rgba(120,90,40,0.5)';
+    ctx.fillRect(-5, -5, 10, 10);
+    ctx.restore();
+  }
+  text(ctx, ember + '/' + maxEmber, x + maxEmber * 16 + 6, y + 11, '12px sans-serif', '#e8dcc0', 'left');
+}
+
+function drawChargePips(ctx, x, y, charge) {
+  for (let i = 0; i < MAX_CHARGE; i++) {
+    circle(ctx, x + i * 24, y + 7, 7);
+    ctx.fillStyle = i < charge ? '#f2c14e' : 'rgba(120,90,40,0.4)';
+    ctx.fill();
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = '#c9a35c';
+    ctx.stroke();
+  }
+  text(ctx, charge + '/' + MAX_CHARGE, x + MAX_CHARGE * 24 + 6, y + 11, '12px sans-serif', '#e8dcc0', 'left');
+}
+
+function drawSidePanel(ctx, side, label, yTop) {
+  text(ctx, label, 24, yTop, 'bold 16px Georgia, serif', '#f2c14e', 'left');
+  drawLifeBar(ctx, 24, yTop + 8, side.life, 20);
+  text(ctx, 'EMBER', 24, yTop + 48, '11px sans-serif', '#c9a35c', 'left');
+  drawEmberPips(ctx, 76, yTop + 36, side.ember, side.maxEmber);
+  text(ctx, 'CHARGE', 24, yTop + 72, '11px sans-serif', '#c9a35c', 'left');
+  drawChargePips(ctx, 80, yTop + 60, side.charge);
+}
+
+function drawButton(ctx, r, label, enabled, lit) {
+  rr(ctx, r.x, r.y, r.w, r.h, 8);
+  ctx.fillStyle = lit ? '#f2c14e' : enabled ? '#3a6b46' : '#3a3a34';
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = lit ? '#7a5a12' : '#c9a35c';
+  ctx.stroke();
+  text(ctx, label, r.x + r.w / 2, r.y + r.h / 2 + 5, 'bold 14px Georgia, serif', lit ? '#3a2a08' : '#f6efdc', 'center');
 }
 
 function drawLegend(ctx, state) {
   const L = LAYOUT.legend;
   rr(ctx, L.x, L.y, L.w, L.h, 10);
-  ctx.fillStyle = 'rgba(10,20,12,0.72)';
+  ctx.fillStyle = 'rgba(10,28,17,0.88)';
   ctx.fill();
+  ctx.lineWidth = 1;
   ctx.strokeStyle = '#c9a35c';
-  ctx.lineWidth = 1.5;
   ctx.stroke();
-  let y = L.y + 16;
-  text(ctx, 'LEGEND', L.x + 12, y, 13, '#f2c14e', 'left');
-  y += 22;
-  const cycle = [['flame', 'beats'], ['thorn', 'beats'], ['tide', 'beats']];
-  for (let i = 0; i < cycle.length; i++) {
-    const el = cycle[i][0];
-    const next = el === 'flame' ? 'thorn' : el === 'thorn' ? 'tide' : 'flame';
-    text(ctx, `${ELEMENT_GLYPH[el]} ${ELEMENT_NAME[el]}`, L.x + 12, y, 13, ELEMENT_COLOR[el], 'left');
-    text(ctx, '>', L.x + 92, y, 13, '#fff', 'left');
-    text(ctx, ELEMENT_NAME[next], L.x + 108, y, 13, '#fff', 'left');
-    y += 20;
-  }
-  y += 2;
-  text(ctx, 'TRICKS', L.x + 12, y, 12, '#f2c14e', 'left');
-  y += 18;
-  const tricks = ['Draw 2 cards', 'Steal 1 ember', 'Heal 3 Life', 'Draw 1 + ember 1'];
-  for (const t of tricks) {
-    text(ctx, '• ' + t, L.x + 12, y, 11, '#e8e0cc', 'left');
-    y += 16;
-  }
-  y += 2;
-  text(ctx, 'CHARGE', L.x + 12, y, 12, '#f2c14e', 'left');
-  y += 18;
-  text(ctx, 'Play into the wind:', L.x + 12, y, 11, '#e8e0cc', 'left');
-  y += 15;
-  text(ctx, '+1 Charge. Spend on', L.x + 12, y, 11, '#e8e0cc', 'left');
-  y += 15;
-  text(ctx, 'POWER (+2) or WARD.', L.x + 12, y, 11, '#e8e0cc', 'left');
-  y += 12;
-  const deckN = state.player ? state.player.pile.drawPile.length : 30;
-  text(ctx, `Deck: ${deckN} cards`, L.x + 12, y, 11, '#fff', 'left');
-  y += 15;
-  text(ctx, 'Reshuffles when empty.', L.x + 12, y, 11, '#9fb8a5', 'left');
+  const x = L.x + 14;
+  text(ctx, 'LEGEND', x, L.y + 22, 'bold 14px Georgia, serif', '#f2c14e', 'left');
+  ctx.beginPath();
+  ctx.moveTo(x, L.y + 30);
+  ctx.lineTo(L.x + L.w - 14, L.y + 30);
+  ctx.strokeStyle = 'rgba(201,163,92,0.5)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  // Element cycle, glyph by glyph so each keeps its own colour.
+  const cycle = [
+    [['▲ ', ELEMENT_COLOR.flame], ['Flame ', '#e8dcc0'], ['> ', '#f2c14e'], ['✦ ', ELEMENT_COLOR.thorn], ['Thorn', '#e8dcc0']],
+    [['✦ ', ELEMENT_COLOR.thorn], ['Thorn ', '#e8dcc0'], ['> ', '#f2c14e'], ['● ', ELEMENT_COLOR.tide], ['Tide', '#e8dcc0']],
+    [['● ', ELEMENT_COLOR.tide], ['Tide ', '#e8dcc0'], ['> ', '#f2c14e'], ['▲ ', ELEMENT_COLOR.flame], ['Flame', '#e8dcc0']],
+  ];
+  ctx.font = '12px sans-serif';
+  cycle.forEach((segs, i) => {
+    let cx = x;
+    const cy = L.y + 52 + i * 18;
+    for (const [t, c] of segs) {
+      ctx.fillStyle = c;
+      ctx.fillText(t, cx, cy);
+      cx += ctx.measureText(t).width;
+    }
+  });
+  text(ctx, 'TRICKS', x, L.y + 126, 'bold 12px Georgia, serif', '#f2c14e', 'left');
+  const tricks = ['Draw 2 cards', 'Steal 1 ember', 'Heal 3 Life', 'Draw 1 + 1 ember'];
+  tricks.forEach((t, i) => {
+    text(ctx, '· ' + t, x, L.y + 146 + i * 18, '12px sans-serif', '#e8dcc0', 'left');
+  });
+  ctx.beginPath();
+  ctx.moveTo(x, L.y + 228);
+  ctx.lineTo(L.x + L.w - 14, L.y + 228);
+  ctx.strokeStyle = 'rgba(201,163,92,0.5)';
+  ctx.stroke();
+  const deckN = state.player ? state.player.pile.drawPile.length : 0;
+  text(ctx, 'Deck: ' + deckN + ' cards', x, L.y + 250, '12px sans-serif', '#e8dcc0', 'left');
+  text(ctx, 'Reshuffle when empty', x, L.y + 268, '12px sans-serif', '#c9a35c', 'left');
+  text(ctx, 'Reshuffles: ' + state.reshuffles, x, L.y + 286, '12px sans-serif', '#c9a35c', 'left');
 }
 
-function drawPlay(ctx, s) {
-  const p = s.player;
-  const r = s.rook;
+// --------------------------------------------------------------- scenes --
+function drawTable(ctx) {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#1d5a37');
+  g.addColorStop(0.5, '#1a5232');
+  g.addColorStop(1, '#123f27');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+  // Wood frame + gold inner line.
+  ctx.fillStyle = '#3a2417';
+  ctx.fillRect(0, 0, W, 10);
+  ctx.fillRect(0, H - 10, W, 10);
+  ctx.fillRect(0, 0, 10, H);
+  ctx.fillRect(W - 10, 0, 10, H);
+  ctx.strokeStyle = 'rgba(201,163,92,0.55)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(14.5, 14.5, W - 29, H - 29);
+}
 
-  // Rook portrait + life + charge.
-  ctx.beginPath();
-  ctx.arc(64, 46, 30, 0, Math.PI * 2);
-  ctx.fillStyle = '#2c2c34';
-  ctx.fill();
-  ctx.strokeStyle = '#c9a35c';
-  ctx.lineWidth = 3;
-  ctx.stroke();
-  text(ctx, '♜', 64, 48, 30, '#f2c14e', 'center');
-  text(ctx, 'ROOK', 110, 30, 16, '#fff', 'left');
-  const rl = rookLifeRect();
-  drawLifeBar(ctx, rl.x, rl.y, rl.w, rl.h, r.life, 'ROOK');
-  drawChargePips(ctx, 110, 88, r.charge, 'CHARGE');
-  if (s.rookThinking > 0 && s.turn === 'rook') {
-    const pulse = 0.6 + 0.4 * Math.sin(Date.now() / 130);
-    ctx.globalAlpha = pulse;
-    text(ctx, 'Rook is thinking...', 330, 46, 15, '#ffd94e', 'left');
-    ctx.globalAlpha = 1;
-  }
-  // Rook hand, face down.
-  for (let i = 0; i < r.hand.length; i++) {
-    const total = r.hand.length * LAYOUT.rookHandW + (r.hand.length - 1) * 8;
-    const x = (W - total) / 2 + i * (LAYOUT.rookHandW + 8);
-    drawCardBack(ctx, x, LAYOUT.rookHandY, LAYOUT.rookHandW, LAYOUT.rookHandH);
-  }
-  text(ctx, `Ember ${r.ember}/${r.maxEmber}`, 1080, 40, 13, '#cfe3ff', 'right');
-  text(ctx, `Turn ${s.turnNum}`, 1080, 62, 13, '#cfe3ff', 'right');
+function drawPlay(ctx, state) {
+  drawTable(ctx);
+  const pulse = 0.5 + 0.5 * Math.sin(frame * 0.15);
 
-  // Taunt bubble near Rook.
-  if (s.rookTaunt) {
-    const msg = s.rookTaunt.text;
-    ctx.font = 'bold 13px sans-serif';
-    const tw = ctx.measureText(msg).width + 24;
-    const bx = Math.min(1020, Math.max(560, 640 - tw / 2));
-    rr(ctx, bx, 122, tw, 34, 16);
-    ctx.fillStyle = 'rgba(20,16,10,0.92)';
-    ctx.fill();
+  // Rook hand (face down).
+  const rn = state.rook.hand.length;
+  const rTotal = rn * LAYOUT.rookHandW + (rn - 1) * 8;
+  const rx0 = (W - rTotal) / 2;
+  for (let i = 0; i < rn; i++) {
+    drawCardBack(ctx, rx0 + i * (LAYOUT.rookHandW + 8), LAYOUT.rookHandY, LAYOUT.rookHandW, LAYOUT.rookHandH);
+  }
+  // Rook thinking pulse + dots.
+  if (state.rookThinking > 0) {
+    ctx.save();
+    ctx.globalAlpha = 0.25 + 0.35 * pulse;
+    rr(ctx, rx0 - 8, LAYOUT.rookHandY - 6, rTotal + 16, LAYOUT.rookHandH + 12, 10);
     ctx.strokeStyle = '#f2c14e';
-    ctx.lineWidth = 1.5;
+    ctx.lineWidth = 2;
     ctx.stroke();
-    text(ctx, msg, bx + tw / 2, 140, 13, '#ffe9a8', 'center');
+    ctx.restore();
+    text(ctx, '...', rx0 + rTotal + 14, LAYOUT.rookHandY + 58, 'bold 30px Georgia, serif', '#f2c14e', 'left');
+  }
+  // Rook taunt bubble.
+  if (state.rookTaunt) {
+    rr(ctx, 830, 20, 426, 48, 10);
+    ctx.fillStyle = 'rgba(20,10,8,0.88)';
+    ctx.fill();
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = '#c9a35c';
+    ctx.stroke();
+    ctx.font = '13px sans-serif';
+    const lines = wrapText(ctx, state.rookTaunt.text, 400);
+    lines.forEach((ln, i) => {
+      text(ctx, ln, 844, 40 + i * 16, '13px sans-serif', '#f6efdc', 'left');
+    });
+  }
+  if (state.muted) {
+    text(ctx, 'MUTED', W - 24, 14, '11px sans-serif', '#c9a35c', 'right');
   }
 
-  // Compact Resonance badge, top-right of the table — never a big banner.
-  if (s.resonance.player) {
-    rr(ctx, 1064, 96, 196, 30, 15);
-    ctx.fillStyle = '#f2c14e';
-    ctx.fill();
-    text(ctx, '✦ RESONANCE +1', 1162, 112, 13, '#3a2417', 'center');
-  }
+  // Side panels.
+  drawSidePanel(ctx, state.rook, 'ROOK', 24);
+  drawSidePanel(ctx, state.player, 'YOU', 468);
+  text(ctx, 'Turn ' + state.turnNum + ' · ' + (state.turn === 'player' ? 'Your move' : "Rook's move"),
+    24, 592, '13px sans-serif', '#e8dcc0', 'left');
+  text(ctx, 'Q POWER · W WARD', 24, 614, '11px sans-serif', '#c9a35c', 'left');
 
   // Guardians.
-  for (let i = 0; i < r.guardians.length; i++) {
-    drawGuardian(ctx, r.guardians[i], rookGuardianRect(i, r.guardians.length), false);
-  }
-  for (let i = 0; i < p.guardians.length; i++) {
-    const aimed = !!(s.rookAim && s.rookAim.kind === 'guardian' && s.rookAim.index === i);
-    drawGuardian(ctx, p.guardians[i], playerGuardianRect(i, p.guardians.length), aimed);
-  }
+  state.rook.guardians.forEach((g, i) => {
+    const r = rookGuardianRect(i, state.rook.guardians.length);
+    drawGuardian(ctx, g, r.x, r.y, r.w, r.h);
+  });
+  state.player.guardians.forEach((g, i) => {
+    const r = playerGuardianRect(i, state.player.guardians.length);
+    drawGuardian(ctx, g, r.x, r.y, r.w, r.h);
+  });
 
-  // Center divider + turn banner line.
-  text(ctx, s.turn === 'player' ? '— YOUR TURN —' : '— ROOK\u2019S TURN —', 640, 340, 13, 'rgba(255,255,255,0.65)', 'center');
-  if (s.rookAim && s.rookAim.kind === 'life') {
-    const pl = playerLifeRect();
-    rr(ctx, pl.x - 6, pl.y - 30, 240, 24, 6);
-    ctx.fillStyle = '#ffd94e';
-    ctx.fill();
-    text(ctx, 'ROOK AIMS HERE', pl.x + 114, pl.y - 17, 11, '#3a2417', 'center');
-  }
+  // Centre dressing: pact circle, sparks, last-play slot.
+  drawLastPlaySlot(ctx, state);
 
-  // Player portrait + life + charge + buttons.
-  ctx.beginPath();
-  ctx.arc(64, 610, 30, 0, Math.PI * 2);
-  ctx.fillStyle = '#5c2a1a';
-  ctx.fill();
-  ctx.strokeStyle = '#c9a35c';
-  ctx.lineWidth = 3;
-  ctx.stroke();
-  text(ctx, '♥', 64, 612, 26, '#f2c14e', 'center');
-  text(ctx, 'YOU', 110, 572, 16, '#fff', 'left');
-  const pl = playerLifeRect();
-  drawLifeBar(ctx, pl.x, pl.y, pl.w, pl.h, p.life, 'YOU');
-  drawChargePips(ctx, 110, 624, p.charge, 'CHARGE');
-  drawButton(ctx, LAYOUT.powerBtn, `POWER${p.powerArmed ? ' ✓' : ''} (Q)`, p.charge >= 1 && !p.powerArmed, p.powerArmed);
-  drawButton(ctx, LAYOUT.wardBtn, `WARD${p.wardArmed ? ' ✓' : ''} (W)`, p.charge >= 1 && !p.wardArmed, p.wardArmed);
-  if (p.charge >= 1 && !p.powerArmed && !p.wardArmed) {
-    text(ctx, 'Charge ready!', 248, 674, 11, '#f2c14e', 'left');
-  }
-  text(ctx, `Ember ${p.ember}/${p.maxEmber}`, 260, 600, 14, '#cfe3ff', 'left');
-  text(ctx, `Deck ${p.pile.drawPile.length}`, 260, 624, 12, '#cfe3ff', 'left');
+  // Log.
+  text(ctx, 'LOG', 24, 308, 'bold 12px Georgia, serif', '#c9a35c', 'left');
+  ctx.font = '12px sans-serif';
+  state.log.forEach((line, i) => {
+    ctx.globalAlpha = Math.max(0.35, 1 - i * 0.13);
+    ctx.fillStyle = '#d8cfae';
+    ctx.fillText(line.slice(0, 44), 24, 326 + i * 17);
+  });
+  ctx.globalAlpha = 1;
+
+  // Legend.
+  drawLegend(ctx, state);
 
   // Player hand.
-  for (let i = 0; i < p.hand.length; i++) {
-    const card = p.hand[i];
-    const rect = handCardRect(i, p.hand.length);
-    const afford = card.cost <= p.ember && s.turn === 'player';
-    drawHandCard(ctx, card, rect, { dim: !afford, selected: !!(s.pendingStrike && false) });
-    text(ctx, String(i + 1), rect.x + rect.w / 2, rect.y - 10, 11, '#cfe3ff', 'center');
-  }
+  state.player.hand.forEach((card, i) => {
+    const r = handCardRect(i, state.player.hand.length);
+    const dim = card.cost > state.player.ember;
+    drawCardFace(ctx, card, r.x, r.y, r.w, r.h, { dim });
+    if (state.player.powerArmed && card.type === 'strike') {
+      rr(ctx, r.x + r.w - 44, r.y + 30, 34, 18, 6);
+      ctx.fillStyle = '#f2c14e';
+      ctx.fill();
+      text(ctx, '+2', r.x + r.w - 27, r.y + 43, 'bold 11px Georgia, serif', '#3a2a08', 'center');
+    }
+  });
 
-  // End turn.
-  drawButton(ctx, LAYOUT.endTurn, 'END TURN ⏎', s.turn === 'player' && !s.pendingStrike, false);
+  // Buttons.
+  const endLit = state.turn === 'player' && !state.pendingStrike;
+  drawButton(ctx, LAYOUT.endTurn, 'END TURN', endLit, false);
+  drawButton(ctx, LAYOUT.powerBtn, 'POWER (Q)', state.player.charge >= 1, state.player.powerArmed);
+  drawButton(ctx, LAYOUT.wardBtn, 'WARD (W)', state.player.charge >= 1, state.player.wardArmed);
 
-  // Pending strike prompt.
-  if (s.pendingStrike) {
-    rr(ctx, 420, 522, 440, 26, 13);
-    ctx.fillStyle = 'rgba(20,16,10,0.9)';
+  // Resonance badge, compact, top-right of the table.
+  const res = state.resonance.player ? 'player' : state.resonance.rook ? 'rook' : null;
+  if (res) {
+    const label = res === 'player' ? '✦ RESONANCE +1' : 'ROOK RESONANCE +1';
+    rr(ctx, 1070, 112, 186, 28, 14);
+    ctx.fillStyle = res === 'player' ? 'rgba(242,193,78,0.92)' : 'rgba(63,158,77,0.92)';
     ctx.fill();
-    ctx.strokeStyle = '#ffd94e';
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-    text(ctx, `${s.pendingStrike.card.name} (${s.pendingStrike.power}) — click a Guardian or Rook`, 640, 536, 13, '#ffe9a8', 'center');
+    text(ctx, label, 1163, 131, 'bold 13px Georgia, serif', '#1c130c', 'center');
   }
 
-  // Message line under the table center.
-  if (s.message && s.messageTtl > 0) {
-    text(ctx, s.message, 640, 372, 15, '#ffe9a8', 'center');
+  // Announce message pill.
+  if (state.messageTtl > 0 && state.message) {
+    ctx.font = '15px sans-serif';
+    const tw = ctx.measureText(state.message).width;
+    const bw = tw + 36;
+    rr(ctx, 640 - bw / 2, 111, bw, 30, 15);
+    ctx.fillStyle = 'rgba(10,10,8,0.72)';
+    ctx.fill();
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = '#c9a35c';
+    ctx.stroke();
+    text(ctx, state.message, 640, 131, '15px sans-serif', '#f6efdc', 'center');
+  }
+
+  // Pending strike: invite a target.
+  if (state.pendingStrike) {
+    ctx.save();
+    ctx.globalAlpha = 0.55 + 0.45 * pulse;
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = '#ffd94a';
+    state.rook.guardians.forEach((g, i) => {
+      const r = rookGuardianRect(i, state.rook.guardians.length);
+      rr(ctx, r.x - 3, r.y - 3, r.w + 6, r.h + 6, 10);
+      ctx.stroke();
+    });
+    const lr = rookLifeRect();
+    rr(ctx, lr.x - 3, lr.y - 3, lr.w + 6, lr.h + 6, 10);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // Rook telegraph: the aim is readable before the hit lands.
+  if (state.rookAim) {
+    const aim = state.rookAim;
+    const r = aim.kind === 'guardian'
+      ? playerGuardianRect(aim.index, state.player.guardians.length)
+      : playerLifeRect();
+    ctx.save();
+    ctx.globalAlpha = 0.6 + 0.4 * pulse;
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = '#ffd94a';
+    rr(ctx, r.x - 4, r.y - 4, r.w + 8, r.h + 8, 10);
+    ctx.stroke();
+    ctx.restore();
+    const label = 'ROOK AIMS HERE · ' + aim.damage;
+    ctx.font = 'bold 13px Georgia, serif';
+    const lw = ctx.measureText(label).width + 20;
+    const lx = r.x + r.w / 2 - lw / 2;
+    const ly = r.y - 26;
+    rr(ctx, lx, ly, lw, 20, 10);
+    ctx.fillStyle = 'rgba(20,10,8,0.85)';
+    ctx.fill();
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = '#ffd94a';
+    ctx.stroke();
+    text(ctx, label, r.x + r.w / 2, ly + 14, 'bold 13px Georgia, serif', '#ffd94a', 'center');
   }
 
   // Floaters.
-  for (const f of s.floaters) {
-    ctx.globalAlpha = Math.min(1, f.ttl);
-    text(ctx, f.text, f.x, f.y, 16, '#f2c14e', 'center');
-    ctx.globalAlpha = 1;
+  for (const f of state.floaters) {
+    ctx.save();
+    ctx.globalAlpha = Math.max(0, Math.min(1, f.ttl / 1.6));
+    text(ctx, f.text, f.x, f.y, 'bold 16px Georgia, serif', '#f2c14e', 'center');
+    ctx.restore();
   }
 
-  // Log, left edge.
-  ctx.font = '11px sans-serif';
-  ctx.textAlign = 'left';
-  ctx.textBaseline = 'middle';
-  s.log.slice(0, 6).forEach((line, i) => {
-    ctx.fillStyle = i === 0 ? '#ffe9a8' : 'rgba(232,224,204,0.75)';
-    ctx.fillText(line.slice(0, 44), LAYOUT.log.x, LAYOUT.log.y + i * 18);
-  });
-
-  drawLegend(ctx, s);
-
-  if (s.paused) {
-    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  if (state.paused) {
+    ctx.fillStyle = 'rgba(8,10,8,0.6)';
     ctx.fillRect(0, 0, W, H);
-    text(ctx, 'PAUSED — press P to resume', 640, 360, 28, '#fff', 'center');
+    text(ctx, 'PAUSED', 640, 340, 'bold 48px Georgia, serif', '#f2c14e', 'center');
+    text(ctx, 'Press P to resume', 640, 380, '16px sans-serif', '#e8dcc0', 'center');
   }
 }
 
-function drawTitle(ctx, s) {
-  drawTable(ctx);
-  text(ctx, 'EMBER PACT', 640, 150, 72, '#f2c14e', 'center');
-  text(ctx, 'An elemental card duel against Rook', 640, 205, 20, '#e8e0cc', 'center');
-  const lines = [
-    'Flame beats Thorn · Thorn beats Tide · Tide beats Flame  —  advantage +2',
-    'Play 2 cards of one element in a turn: RESONANCE +1 power.',
-    'Charge: play a card that loses to Rook\u2019s last element to earn +1 Charge (max 3).',
-    'Spend Charge on POWER (+2 next card) or WARD (fizzle Rook\u2019s next strike).',
-    '20 Life · 30-card deck · ember grows each turn · Space ends turn · R restarts',
-  ];
-  lines.forEach((l, i) => text(ctx, l, 640, 268 + i * 28, 16, '#fff', 'center'));
-  drawButton(ctx, LAYOUT.startBtn, '▶  START DUEL', true, false);
-  text(ctx, 'Click Start or press Enter', 640, 596, 14, '#cfe3ff', 'center');
-  if (s.best > 0) text(ctx, `Best score: ${s.best}`, 640, 626, 15, '#f2c14e', 'center');
-  text(ctx, 'No accounts. No ads. Just cards.', 640, 668, 12, 'rgba(232,224,204,0.6)', 'center');
+function sampleCards() {
+  const want = ['Flame Lash', 'Bramble Wall', 'Deep Draw'];
+  return want.map((name) => {
+    const def = CARD_DEFS.find((d) => d.name === name);
+    return { name: def.name, element: def.element, type: def.type, cost: def.cost, power: def.power, text: def.text, effect: def.effect || null };
+  });
 }
 
-function drawEnd(ctx, s, won) {
+function drawTitle(ctx, state) {
   drawTable(ctx);
+  // Dressing behind the title: pact ring + drifting sparks.
+  drawPactCircle(ctx, 640, 132);
+  drawSparks(ctx, state.seed, 640, 132);
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.6)';
+  ctx.shadowBlur = 12;
+  ctx.shadowOffsetY = 4;
+  text(ctx, 'EMBER PACT', 640, 158, 'bold 84px Georgia, serif', '#f2c14e', 'center');
+  ctx.restore();
+  text(ctx, 'An elemental card duel — you vs Rook', 640, 196, '20px Georgia, serif', '#d8cfae', 'center');
+
+  // Rules panel.
+  rr(ctx, 380, 226, 520, 226, 12);
+  ctx.fillStyle = 'rgba(10,30,18,0.72)';
+  ctx.fill();
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = '#c9a35c';
+  ctx.stroke();
+  text(ctx, 'HOW TO PLAY', 640, 256, 'bold 16px Georgia, serif', '#f2c14e', 'center');
+  text(ctx, '▲ Flame  >  ✦ Thorn  >  ● Tide  >  ▲ Flame', 640, 290, '15px sans-serif', '#e8dcc0', 'center');
+  text(ctx, 'Play the element that beats the foe’s last card: +2 power.', 640, 316, '13px sans-serif', '#c9a35c', 'center');
+  text(ctx, 'RESONANCE — 2 cards of one element in a turn: both +1 power.', 640, 344, '13px sans-serif', '#e8dcc0', 'center');
+  text(ctx, 'CHARGE — play into the wind (your element loses): +1 Charge.', 640, 370, '13px sans-serif', '#e8dcc0', 'center');
+  text(ctx, 'Spend Charge on POWER (+2) or WARD (Rook’s strike fizzles).', 640, 394, '13px sans-serif', '#c9a35c', 'center');
+  text(ctx, 'Tricks: Draw 2 · Steal 1 ember · Heal 3 · Draw 1 + 1 ember.', 640, 420, '13px sans-serif', '#e8dcc0', 'center');
+  text(ctx, 'Click a card to play · 1–5 · Space end turn · R restart', 640, 442, '12px sans-serif', '#c9a35c', 'center');
+
+  // Divider ornament between rules and the button.
+  ctx.beginPath();
+  ctx.moveTo(560, 484);
+  ctx.lineTo(720, 484);
+  ctx.strokeStyle = 'rgba(201,163,92,0.6)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  text(ctx, '✦', 640, 489, '14px Georgia, serif', '#c9a35c', 'center');
+
+  drawButton(ctx, LAYOUT.startBtn, 'START DUEL', true, true);
+
+  // Best score, or a neutral line when nothing is stored yet.
+  if (state.best > 0) {
+    text(ctx, 'Best score: ' + state.best, 640, 592, '15px Georgia, serif', '#f2c14e', 'center');
+  } else {
+    text(ctx, 'No score yet — seal your first pact!', 640, 592, '15px Georgia, serif', '#c9a35c', 'center');
+  }
+
+  // Three sample cards, fanned under the button.
+  const cards = sampleCards();
+  const centres = [520, 640, 760];
+  const tilts = [-0.16, 0, 0.16];
+  cards.forEach((card, i) => {
+    ctx.save();
+    ctx.translate(centres[i], 655);
+    ctx.rotate(tilts[i]);
+    drawCardFace(ctx, card, -42, -55, 84, 110, {});
+    ctx.restore();
+  });
+}
+
+function drawEnd(ctx, state, won) {
+  drawTable(ctx);
+  ctx.fillStyle = won ? 'rgba(8,14,8,0.55)' : 'rgba(14,6,6,0.62)';
+  ctx.fillRect(0, 0, W, H);
+  // Confetti goes over the dimming veil, not under it, so the pieces
+  // read as bright paper instead of faint dust behind glass.
   if (won) {
-    for (const c of s.confetti) {
+    for (const c of state.confetti) {
       ctx.save();
       ctx.translate(c.x, c.y);
       ctx.rotate(c.r);
@@ -429,29 +702,41 @@ function drawEnd(ctx, s, won) {
       ctx.fillRect(-c.s / 2, -c.s / 2, c.s, c.s * 0.6);
       ctx.restore();
     }
-    text(ctx, 'VICTORY!', 640, 220, 68, '#f2c14e', 'center');
-    text(ctx, 'Rook is broken. The pact is yours.', 640, 285, 20, '#fff', 'center');
-  } else {
-    rr(ctx, 340, 150, 600, 92, 14);
-    ctx.fillStyle = '#8f1f10';
-    ctx.fill();
-    ctx.strokeStyle = '#ffd94e';
-    ctx.lineWidth = 3;
-    ctx.stroke();
-    text(ctx, 'ROOK WINS', 640, 186, 52, '#fff', 'center');
-    text(ctx, 'DEFEAT — your Life reached 0', 640, 222, 18, '#ffd9c9', 'center');
-    text(ctx, 'The embers gutter out... for now.', 640, 300, 20, '#fff', 'center');
   }
-  text(ctx, `Score: ${s.score}`, 640, won ? 340 : 352, 26, '#fff', 'center');
-  text(ctx, `Life left: ${s.player ? s.player.life : 0}  ·  Turns: ${s.turnNum}  ·  Cards played: ${s.cardsPlayed}`, 640, won ? 385 : 397, 16, '#cfe3ff', 'center');
-  if (s.best > 0) text(ctx, `Best score: ${s.best}`, 640, won ? 420 : 432, 15, '#f2c14e', 'center');
-  drawButton(ctx, LAYOUT.againBtn, won ? '↻  PLAY AGAIN' : '↻  RETRY', true, false);
+  if (won) {
+    text(ctx, 'VICTORY', 640, 230, 'bold 76px Georgia, serif', '#f2c14e', 'center');
+    text(ctx, 'Rook is broken. The pact is yours.', 640, 272, '20px Georgia, serif', '#e8dcc0', 'center');
+  } else {
+    text(ctx, 'DEFEAT', 640, 220, 'bold 76px Georgia, serif', '#e2482a', 'center');
+    rr(ctx, 520, 248, 240, 40, 20);
+    ctx.fillStyle = 'rgba(20,10,8,0.85)';
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#f2c14e';
+    ctx.stroke();
+    text(ctx, 'ROOK WINS', 640, 275, 'bold 24px Georgia, serif', '#f2c14e', 'center');
+    text(ctx, 'The embers go cold. Try again.', 640, 316, '18px Georgia, serif', '#e8dcc0', 'center');
+  }
+  const baseY = won ? 330 : 360;
+  text(ctx, 'Score: ' + state.score, 640, baseY, 'bold 28px Georgia, serif', '#f6efdc', 'center');
+  if (won) {
+    text(ctx, 'Life left: ' + state.player.life + ' / 20', 640, baseY + 36, '18px sans-serif', '#e8dcc0', 'center');
+  }
+  text(ctx, 'Cards played: ' + state.cardsPlayed, 640, baseY + 66, '18px sans-serif', '#e8dcc0', 'center');
+  text(ctx, 'Best score: ' + state.best, 640, baseY + 96, '18px sans-serif', '#f2c14e', 'center');
+  drawButton(ctx, LAYOUT.againBtn, won ? 'PLAY AGAIN' : 'RETRY', true, true);
+  text(ctx, 'Enter or R to play again', 640, LAYOUT.againBtn.y + 84, '13px sans-serif', '#c9a35c', 'center');
 }
 
-export function draw(ctx, s) {
-  ctx.clearRect(0, 0, W, H);
-  if (s.phase === 'title') drawTitle(ctx, s);
-  else if (s.phase === 'win') drawEnd(ctx, s, true);
-  else if (s.phase === 'loss') drawEnd(ctx, s, false);
-  else drawPlay(ctx, s);
+export function draw(ctx, state) {
+  frame++;
+  if (state.phase === 'title') {
+    drawTitle(ctx, state);
+  } else if (state.phase === 'win') {
+    drawEnd(ctx, state, true);
+  } else if (state.phase === 'loss') {
+    drawEnd(ctx, state, false);
+  } else {
+    drawPlay(ctx, state);
+  }
 }
